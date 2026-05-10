@@ -1,0 +1,21 @@
+{
+  "_schema": "et_module/2.0",
+  "module_id": "animus",
+  "display_name": "Animus",
+  "version": "0.1.0",
+  "description": "Substrate-native agentic gateway — replaces OpenClaw/Hermes/Agent Zero dependency",
+  "git_remote": "https://github.com/greatnorthernfishguy-hub/Animus.git",
+  "git_branch": "main",
+  "entry_point": "animus",
+  "install_path": "/home/josh/Animus",
+  "service_name": "animus",
+  "api_port": 8848,
+  "ecosystem": {
+    "ng_lite": true,
+    "ng_lite_version": "1.0.0",
+    "vendored_files": [
+      "ng_lite.py", "ng_tract_bridge.py", "ng_ecosystem.py",
+      "ng_autonomic.py", "openclaw_adapter.py", "ng_embed.py", "ng_peer_bridge.py"
+    ]
+  }
+}

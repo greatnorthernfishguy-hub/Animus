@@ -1,0 +1,9 @@
+# ---- Changelog ----
+# [2026-05-10] Claude (Sonnet 4.6) — Task 1: Initial scaffold
+# What: Python requirements for animus_bridge
+# Why: animus_bridge uses stdlib only; vendored files supply all NG dependencies
+# How: Placeholder — no pip deps needed at scaffold stage
+# -------------------
+
+# animus_bridge — stdlib only, no pip dependencies
+# Vendored files provide ng_lite, ng_tract_bridge, etc.
