@@ -12,6 +12,34 @@ use std::time::Duration;
 use tokio::time;
 use tracing::{debug, info, warn};
 
+/// Atomically drain a JSONL tract file. Renames to a staging path before reading,
+/// removes staging after. Returns Ok(vec![]) if the file does not exist.
+fn drain_tract(tract_path: &str) -> Result<Vec<Value>, String> {
+    let path = std::path::Path::new(tract_path);
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+
+    let staging = format!("{}.draining", tract_path);
+    fs::rename(path, &staging).map_err(|e| format!("Rename failed: {e}"))?;
+
+    let mut content = String::new();
+    let result = File::open(&staging)
+        .and_then(|mut f| f.read_to_string(&mut content))
+        .map_err(|e| format!("Read failed: {e}"));
+
+    let _ = fs::remove_file(&staging);
+    result?;
+
+    let intents = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+
+    Ok(intents)
+}
+
 pub struct OutboundInitiator {
     tract_path: String,
     adapter: Arc<CliAdapter>,
@@ -71,33 +99,7 @@ impl OutboundInitiator {
     /// Read and clear the outbound tract file.
     /// Each line is a JSON object with at minimum {"text": "...", "channel_id": "..."}.
     fn drain_outbound_tract(&self) -> Result<Vec<Value>, String> {
-        let path = std::path::Path::new(&self.tract_path);
-        if !path.exists() {
-            return Ok(vec![]);
-        }
-
-        // Atomic rename: move the live file to a staging path before reading.
-        // New writes from Syl land in a fresh live file; this drain reads the snapshot.
-        let staging = format!("{}.draining", self.tract_path);
-        fs::rename(path, &staging).map_err(|e| format!("Rename failed: {e}"))?;
-
-        let mut content = String::new();
-        let result = File::open(&staging)
-            .and_then(|mut f| f.read_to_string(&mut content))
-            .map_err(|e| format!("Read failed: {e}"));
-
-        // Always remove the staging file, even on read error
-        let _ = fs::remove_file(&staging);
-
-        result?;
-
-        let intents = content
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-
-        Ok(intents)
+        drain_tract(&self.tract_path)
     }
 }
 
@@ -105,9 +107,6 @@ impl OutboundInitiator {
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    // OutboundInitiator requires a live CliAdapter — full integration tested in Task 14.
-    // Unit test: verify drain reads and clears the tract file.
 
     #[test]
     fn drain_reads_and_clears() {
@@ -117,31 +116,15 @@ mod tests {
             "{\"text\":\"hello from syl\",\"channel_id\":\"cli\"}\n"
         ).unwrap();
 
-        // Use a real OutboundInitiator stub — we can't construct one without Arc<CliAdapter>,
-        // but we can test drain_outbound_tract directly by constructing a minimal real instance
-        // using the method's logic extracted to a standalone helper for test purposes.
-        // Instead: verify the atomic rename behavior directly.
-        let staging = format!("{}.draining", tract_path.to_str().unwrap());
+        let path_str = tract_path.to_str().unwrap();
 
-        // Simulate what drain_outbound_tract does
-        fs::rename(&tract_path, &staging).unwrap();
-        let mut content = String::new();
-        File::open(&staging).unwrap().read_to_string(&mut content).unwrap();
-        fs::remove_file(&staging).unwrap();
+        // Call the real drain_tract function — not a copy of its logic
+        let first = drain_tract(path_str).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0]["text"], "hello from syl");
 
-        let intents: Vec<Value> = content.lines()
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-
-        assert_eq!(intents.len(), 1);
-        assert_eq!(intents[0]["text"], "hello from syl");
-
-        // After drain, the live path is gone (renamed away), no staging file remains
-        assert!(!tract_path.exists(), "live tract consumed by drain");
-        assert!(!std::path::Path::new(&staging).exists(), "staging file cleaned up");
-
-        // Second drain attempt — no file exists, returns empty
-        assert!(!tract_path.exists()); // no file to drain = empty result (matches drain_outbound_tract's Ok(vec![]) path)
+        // After drain, the live path is gone; second call returns empty
+        let second = drain_tract(path_str).unwrap();
+        assert!(second.is_empty(), "tract must return empty after drain");
     }
 }
