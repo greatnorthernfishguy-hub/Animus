@@ -15,9 +15,9 @@ pub struct AnimusConfig {
     pub trollguard_url: String,
     /// TID HTTP base URL. Default: http://127.0.0.1:7437
     pub tid_url: String,
-    /// Absolute path to neurograph_rpc.py. Default: /home/josh/NeuroGraph/neurograph_rpc.py
+    /// Absolute path to neurograph_rpc.py. Default: $HOME/NeuroGraph/neurograph_rpc.py
     pub neurograph_rpc_path: String,
-    /// Absolute path to animus_bridge/bridge.py. Default: /home/josh/Animus/animus_bridge/bridge.py
+    /// Absolute path to animus_bridge/bridge.py. Default: $HOME/Animus/animus_bridge/bridge.py
     pub bridge_path: String,
     /// Discord bot token (optional — Discord adapter disabled if unset). Set: DISCORD_TOKEN
     pub discord_token: Option<String>,
@@ -34,7 +34,8 @@ impl AnimusConfig {
         let auth_token = env::var("ANIMUS_AUTH_TOKEN")
             .map_err(|_| "ANIMUS_AUTH_TOKEN not set in environment".to_string())?;
 
-        let home = env::var("HOME").unwrap_or_else(|_| "/home/josh".to_string());
+        // LAW 5 — fail-fast if HOME is unset; no hardcoded user paths
+        let home = env::var("HOME").map_err(|_| "HOME env var not set".to_string())?;
         let default_tract_dir = format!("{}/.et_modules/shared_learning", home);
 
         Ok(Self {
@@ -44,9 +45,9 @@ impl AnimusConfig {
             tid_url: env::var("TID_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:7437".to_string()),
             neurograph_rpc_path: env::var("NEUROGRAPH_RPC_PATH")
-                .unwrap_or_else(|_| "/home/josh/NeuroGraph/neurograph_rpc.py".to_string()),
+                .unwrap_or_else(|_| format!("{}/NeuroGraph/neurograph_rpc.py", home)),
             bridge_path: env::var("ANIMUS_BRIDGE_PATH")
-                .unwrap_or_else(|_| "/home/josh/Animus/animus_bridge/bridge.py".to_string()),
+                .unwrap_or_else(|_| format!("{}/Animus/animus_bridge/bridge.py", home)),
             discord_token: env::var("DISCORD_TOKEN").ok(),
             tract_dir: env::var("ANIMUS_TRACT_DIR").unwrap_or(default_tract_dir),
             ws_port: {

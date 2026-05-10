@@ -138,7 +138,8 @@ def main() -> None:
         ng: _MockNg | _NgSubprocess = _MockNg()
     else:
         ng_path = args.ng_path or os.environ.get(
-            "NEUROGRAPH_RPC_PATH", "/home/josh/NeuroGraph/neurograph_rpc.py")
+            "NEUROGRAPH_RPC_PATH",
+            os.path.join(os.environ.get("HOME", ""), "NeuroGraph", "neurograph_rpc.py"))
         ng = _NgSubprocess(ng_path)
         ng.start()
 

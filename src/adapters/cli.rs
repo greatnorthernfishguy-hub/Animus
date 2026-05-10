@@ -33,6 +33,7 @@ pub struct CliAdapter {
     tract: Arc<TractWriter>,
     introspection: Arc<IntrospectionRelay>,
     tid_client: reqwest::Client,
+    tid_url: String,
 }
 
 impl CliAdapter {
@@ -41,12 +42,13 @@ impl CliAdapter {
         rpc: Arc<RpcAdapter>,
         tract: Arc<TractWriter>,
         introspection: Arc<IntrospectionRelay>,
+        tid_url: String,
     ) -> Self {
         let tid_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .expect("failed to build TID HTTP client");
-        Self { trollguard, rpc, tract, introspection, tid_client }
+        Self { trollguard, rpc, tract, introspection, tid_client, tid_url }
     }
 
     /// Process one CLI line as a complete turn. Returns response text.
@@ -105,6 +107,9 @@ impl CliAdapter {
 
         if let Err(e) = &ingest_result {
             warn!("Ingest failed: {}", e);
+            self.tract.deposit_event_silent("ingest_error", serde_json::json!({
+                "error": e.to_string(), "channel_type": "cli"
+            }));
         }
 
         // 3. Introspection context
@@ -139,15 +144,12 @@ impl CliAdapter {
     }
 
     async fn call_tid(&self, text: &str, system_prompt: &str) -> String {
-        let tid_url = std::env::var("TID_URL")
-            .unwrap_or_else(|_| "http://127.0.0.1:7437".to_string());
-
         let body = serde_json::json!({
             "messages": [{"role": "user", "content": text}],
             "system": system_prompt,
         });
 
-        match self.tid_client.post(format!("{}/chat", tid_url)).json(&body).send().await {
+        match self.tid_client.post(format!("{}/chat", self.tid_url)).json(&body).send().await {
             Ok(resp) => {
                 resp.json::<serde_json::Value>().await
                     .ok()

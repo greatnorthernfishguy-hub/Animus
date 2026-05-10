@@ -57,7 +57,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let relay = Arc::new(IntrospectionRelay::new(&cfg.ces_url, &shared_learning_dir));
 
     let cli = CliAdapter::new(
-        Arc::clone(&tg), Arc::clone(&rpc), Arc::clone(&tract), Arc::clone(&relay));
+        Arc::clone(&tg), Arc::clone(&rpc), Arc::clone(&tract), Arc::clone(&relay),
+        cfg.tid_url.clone(),
+    );
 
     info!("Animus ready — reading from stdin (CLI mode)");
 
