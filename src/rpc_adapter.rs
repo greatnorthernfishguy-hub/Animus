@@ -42,8 +42,13 @@ impl BridgeProcess {
 
         // Wait for ready signal
         let mut ready_line = String::new();
-        stdout.read_line(&mut ready_line).await
-            .map_err(|e| format!("Failed to read ready: {e}"))?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            stdout.read_line(&mut ready_line),
+        )
+        .await
+        .map_err(|_| "animus_bridge did not send ready signal within 10s".to_string())?
+        .map_err(|e| format!("Failed to read ready: {e}"))?;
         let ready: Value = serde_json::from_str(ready_line.trim())
             .map_err(|e| format!("Bad ready signal: {e}"))?;
         if ready.get("method").and_then(Value::as_str) != Some("ready") {
@@ -85,8 +90,13 @@ impl RpcAdapter {
             .map_err(|e| format!("Write to bridge failed: {e}"))?;
 
         let mut response_line = String::new();
-        guard.stdout.read_line(&mut response_line).await
-            .map_err(|e| format!("Read from bridge failed: {e}"))?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            guard.stdout.read_line(&mut response_line),
+        )
+        .await
+        .map_err(|_| "animus_bridge did not respond within 30s".to_string())?
+        .map_err(|e| format!("Read from bridge failed: {e}"))?;
 
         let response: Value = serde_json::from_str(response_line.trim())
             .map_err(|e| format!("Bad bridge response: {e}"))?;
