@@ -63,8 +63,7 @@ impl IntrospectionRelay {
                 .lines()
                 .rev()
                 .filter_map(|l| serde_json::from_str(l).ok())
-                .take(n)
-                .collect();
+                .collect();  // No .take(n) here
             events.append(&mut file_events);
             if events.len() >= n {
                 break;
@@ -72,13 +71,14 @@ impl IntrospectionRelay {
         }
 
         events.truncate(n);
+        events.reverse();  // oldest-to-newest
         events
     }
 
     /// Format CES snapshot + Bunyan events as a human-readable context block.
-    pub async fn format_context(&self) -> String {
+    pub async fn format_context(&self, n: usize) -> String {
         let ces = self.fetch_ces_snapshot().await;
-        let bunyan = self.read_bunyan_events(5);
+        let bunyan = self.read_bunyan_events(n);
 
         let mut parts: Vec<String> = Vec::new();
 
