@@ -10,7 +10,12 @@
 // What: Added pub mod envelope for TurnEnvelope + ChannelContext types
 // Why: Core types needed for channel adapter ↔ RPC pipeline handoff
 // How: Module declaration re-exports serde types for integration tests
+// [2026-05-10] Claude (Sonnet 4.6) — Task 4: Auth module
+// What: Added pub mod auth for constant-time token validation
+// Why: WebSocket gateway requires constant-time comparison to prevent timing attacks
+// How: Module declaration re-exports validate_token() for integration tests
 // -------------------
 
-pub mod envelope;
+pub mod auth;
 pub mod config;
+pub mod envelope;
