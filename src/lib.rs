@@ -13,3 +13,4 @@
 // -------------------
 
 pub mod envelope;
+pub mod config;
