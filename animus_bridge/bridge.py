@@ -12,6 +12,10 @@ It does NOT import NeuroGraphMemory or touch substrate bytes. It is a protocol
 proxy with channel-context metadata injection.
 
 # ---- Changelog ----
+# [2026-05-10] Claude (Haiku 4.5) — Add readline timeout to _NgSubprocess
+# What: Added select.select() timeout helper (_read_line) to prevent indefinite hangs on NG subprocess
+# Why: Prevent deadlock if NG hangs or crashes mid-call; bridge must return proper JSON-RPC error, not hang
+# How: select.select() with _NG_CALL_TIMEOUT_S (30s) and _NG_STARTUP_TIMEOUT_S (10s); TimeoutError caught + converted to error response
 # [2026-05-10] Claude (Sonnet 4.6) — Initial implementation
 # What: Python RPC proxy — stdin/stdout JSON-RPC passthrough to neurograph_rpc.py
 # Why: Rust cannot speak NeuroGraph's Python RPC protocol directly
@@ -23,9 +27,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
 import subprocess
 import sys
 import threading
+
+
+_NG_CALL_TIMEOUT_S: float = 30.0   # NG processing budget per call
+_NG_STARTUP_TIMEOUT_S: float = 10.0  # NG must send ready signal within 10s
 
 
 def _parse_args() -> argparse.Namespace:
@@ -69,6 +78,13 @@ class _NgSubprocess:
         self._proc: subprocess.Popen | None = None
         self._lock = threading.Lock()
 
+    def _read_line(self, timeout: float) -> str:
+        """Read one line from NG stdout, raising TimeoutError if no response within timeout."""
+        ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
+        if not ready:
+            raise TimeoutError(f"NG subprocess did not respond within {timeout}s")
+        return self._proc.stdout.readline()
+
     def start(self) -> None:
         self._proc = subprocess.Popen(
             [sys.executable, self._ng_path],
@@ -78,13 +94,16 @@ class _NgSubprocess:
             text=True,
             bufsize=1,
         )
-        ready_line = self._proc.stdout.readline()
+        try:
+            ready_line = self._read_line(_NG_STARTUP_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise RuntimeError(f"NG ready signal not received: {exc}") from exc
         try:
             ready = json.loads(ready_line)
             if ready.get("method") != "ready":
                 raise RuntimeError(f"Unexpected first message from NG: {ready_line!r}")
-        except json.JSONDecodeError:
-            raise RuntimeError(f"NG did not send ready signal, got: {ready_line!r}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"NG ready signal not received: {exc}") from exc
 
     def call(self, method: str, params: dict, req_id) -> dict:
         with self._lock:
@@ -95,7 +114,11 @@ class _NgSubprocess:
                                   "method": method, "params": params})
             self._proc.stdin.write(request + "\n")
             self._proc.stdin.flush()
-            response_line = self._proc.stdout.readline()
+            try:
+                response_line = self._read_line(_NG_CALL_TIMEOUT_S)
+            except TimeoutError:
+                return {"jsonrpc": "2.0", "id": req_id,
+                        "error": {"code": -32000, "message": "NG subprocess timeout"}}
             if not response_line:
                 return {"jsonrpc": "2.0", "id": req_id,
                         "error": {"code": -32000, "message": "NG process closed"}}
