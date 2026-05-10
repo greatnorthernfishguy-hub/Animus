@@ -8,12 +8,10 @@
 // Why: Project scaffold requires a compiling binary target
 // How: Minimal main() function — real entry point wired in subsequent tasks
 // [2026-05-10] Claude (Sonnet 4.6) — Task 2: Envelope module
-// What: Added pub mod envelope for TurnEnvelope + ChannelContext types
+// What: Added TurnEnvelope + ChannelContext types in lib.rs
 // Why: Core types needed for channel adapter ↔ RPC pipeline handoff
-// How: Module declaration before main()
+// How: Removed duplicate pub mod envelope; lib.rs is canonical
 // -------------------
-
-pub mod envelope;
 
 fn main() {
     println!("animus starting (scaffold)");

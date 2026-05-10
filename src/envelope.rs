@@ -66,4 +66,42 @@ mod tests {
         let decoded: ChannelKind = serde_json::from_str(&json).unwrap();
         assert_eq!(kind, decoded);
     }
+
+    #[test]
+    fn channel_kind_cli_roundtrip() {
+        let kind = ChannelKind::Cli;
+        let json = serde_json::to_string(&kind).unwrap();
+        let decoded: ChannelKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(kind, decoded);
+    }
+
+    #[test]
+    fn turn_envelope_with_metadata() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("message_id".to_string(), "123456789".to_string());
+        metadata.insert("timestamp".to_string(), "1684000000".to_string());
+
+        let env = TurnEnvelope {
+            text: "test message".to_string(),
+            context: ChannelContext {
+                channel_kind: ChannelKind::Discord,
+                channel_id: "guild#general".to_string(),
+                user_id: "user_snowflake".to_string(),
+            },
+            metadata,
+        };
+
+        let json = serde_json::to_string(&env).unwrap();
+        let decoded: TurnEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.metadata.get("message_id"), Some(&"123456789".to_string()));
+        assert_eq!(decoded.metadata.get("timestamp"), Some(&"1684000000".to_string()));
+    }
+
+    #[test]
+    fn turn_envelope_rejects_missing_fields() {
+        // Missing required field: metadata
+        let json = r#"{"text": "hello", "context": {"channel_kind": "Cli", "channel_id": "cli", "user_id": "josh"}}"#;
+        let result: Result<TurnEnvelope, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "Should reject TurnEnvelope with missing required fields");
+    }
 }
