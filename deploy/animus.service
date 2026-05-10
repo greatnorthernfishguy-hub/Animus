@@ -1,0 +1,16 @@
+[Unit]
+Description=Animus — Substrate-native agentic gateway
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/josh/Animus
+ExecStart=/home/josh/Animus/target/release/animus
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=%h/.config/animus.env
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
