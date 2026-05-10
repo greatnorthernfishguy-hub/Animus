@@ -14,6 +14,10 @@
 //       IntrospectionRelay → CliAdapter into a stdin/stdout turn loop
 // Why: Provides a working end-to-end CLI pipeline for testing before WebSocket server
 // How: All components constructed from env config, passed as Arc to CliAdapter
+// [2026-05-10] Claude (Sonnet 4.6) — LAW 5 compliance + bootstrap logging
+// What: Removed hardcoded /home/josh/ fallback; bootstrap failure now logged via tracing::warn!
+// Why: LAW 5 requires all config from env — hardcoded path is a violation; silent discard hides failure
+// How: shared_learning_dir uses map_err+? to fail fast if HOME unset; bootstrap uses if let Err
 // -------------------
 
 use animus::adapters::cli::CliAdapter;
@@ -46,10 +50,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tract_path = format!("{}/animus.tract", cfg.tract_dir);
     let tract = Arc::new(TractWriter::new(&tract_path));
 
-    // Bunyan shared_learning_dir: expand $HOME at runtime
+    // Bunyan shared_learning_dir: expand $HOME at runtime — HOME is required (LAW 5)
     let shared_learning_dir = std::env::var("HOME")
         .map(|h| format!("{}/.et_modules/shared_learning", h))
-        .unwrap_or_else(|_| "/home/josh/.et_modules/shared_learning".to_string());
+        .map_err(|_| "HOME env var not set — cannot locate Bunyan shared_learning dir")?;
     let relay = Arc::new(IntrospectionRelay::new(&cfg.ces_url, &shared_learning_dir));
 
     let cli = CliAdapter::new(
@@ -58,7 +62,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Animus ready — reading from stdin (CLI mode)");
 
     // Bootstrap NeuroGraph
-    let _ = rpc.call("bootstrap", serde_json::json!({})).await;
+    if let Err(e) = rpc.call("bootstrap", serde_json::json!({})).await {
+        tracing::warn!("NeuroGraph bootstrap call failed: {} — continuing in degraded state", e);
+    }
 
     // CLI turn loop
     let stdin = tokio::io::stdin();
