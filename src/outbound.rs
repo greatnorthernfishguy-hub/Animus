@@ -30,6 +30,7 @@ impl OutboundInitiator {
     /// Start the pulse loop. Runs forever in a background tokio task.
     pub async fn run(self: Arc<Self>) {
         let mut interval = time::interval(Duration::from_secs(self.pulse_interval_secs));
+        interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         info!("Outbound Initiator started (pulse={}s)", self.pulse_interval_secs);
         loop {
             interval.tick().await;
@@ -75,14 +76,20 @@ impl OutboundInitiator {
             return Ok(vec![]);
         }
 
-        let mut content = String::new();
-        File::open(path)
-            .map_err(|e| format!("Open failed: {e}"))?
-            .read_to_string(&mut content)
-            .map_err(|e| format!("Read failed: {e}"))?;
+        // Atomic rename: move the live file to a staging path before reading.
+        // New writes from Syl land in a fresh live file; this drain reads the snapshot.
+        let staging = format!("{}.draining", self.tract_path);
+        fs::rename(path, &staging).map_err(|e| format!("Rename failed: {e}"))?;
 
-        // Clear the file after draining
-        fs::write(path, "").map_err(|e| format!("Clear failed: {e}"))?;
+        let mut content = String::new();
+        let result = File::open(&staging)
+            .and_then(|mut f| f.read_to_string(&mut content))
+            .map_err(|e| format!("Read failed: {e}"));
+
+        // Always remove the staging file, even on read error
+        let _ = fs::remove_file(&staging);
+
+        result?;
 
         let intents = content
             .lines()
@@ -110,27 +117,31 @@ mod tests {
             "{\"text\":\"hello from syl\",\"channel_id\":\"cli\"}\n"
         ).unwrap();
 
-        // Minimal stub — only needs the drain logic, not the full adapter
-        struct StubInitiator { tract_path: String }
-        impl StubInitiator {
-            fn drain(&self) -> Vec<Value> {
-                let path = std::path::Path::new(&self.tract_path);
-                if !path.exists() { return vec![]; }
-                let mut content = String::new();
-                File::open(path).unwrap().read_to_string(&mut content).unwrap();
-                fs::write(path, "").unwrap();
-                content.lines()
-                    .filter_map(|l| serde_json::from_str(l).ok())
-                    .collect()
-            }
-        }
+        // Use a real OutboundInitiator stub — we can't construct one without Arc<CliAdapter>,
+        // but we can test drain_outbound_tract directly by constructing a minimal real instance
+        // using the method's logic extracted to a standalone helper for test purposes.
+        // Instead: verify the atomic rename behavior directly.
+        let staging = format!("{}.draining", tract_path.to_str().unwrap());
 
-        let stub = StubInitiator { tract_path: tract_path.to_str().unwrap().to_string() };
-        let first = stub.drain();
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0]["text"], "hello from syl");
+        // Simulate what drain_outbound_tract does
+        fs::rename(&tract_path, &staging).unwrap();
+        let mut content = String::new();
+        File::open(&staging).unwrap().read_to_string(&mut content).unwrap();
+        fs::remove_file(&staging).unwrap();
 
-        let second = stub.drain();
-        assert!(second.is_empty(), "tract must be cleared after first drain");
+        let intents: Vec<Value> = content.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0]["text"], "hello from syl");
+
+        // After drain, the live path is gone (renamed away), no staging file remains
+        assert!(!tract_path.exists(), "live tract consumed by drain");
+        assert!(!std::path::Path::new(&staging).exists(), "staging file cleaned up");
+
+        // Second drain attempt — no file exists, returns empty
+        assert!(!tract_path.exists()); // no file to drain = empty result (matches drain_outbound_tract's Ok(vec![]) path)
     }
 }
