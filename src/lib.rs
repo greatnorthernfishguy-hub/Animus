@@ -16,6 +16,7 @@
 // How: Module declaration re-exports validate_token() for integration tests
 // -------------------
 
+pub mod adapters;
 pub mod auth;
 pub mod config;
 pub mod envelope;
