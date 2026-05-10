@@ -21,6 +21,7 @@ pub mod auth;
 pub mod config;
 pub mod envelope;
 pub mod introspection;
+pub mod outbound;
 pub mod rpc_adapter;
 pub mod tract_writer;
 pub mod trollguard;
