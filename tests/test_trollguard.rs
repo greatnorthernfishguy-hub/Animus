@@ -28,7 +28,7 @@ async fn safe_verdict_passes() {
 #[tokio::test]
 async fn malicious_verdict_blocks() {
     let mut server = mockito::Server::new_async().await;
-    server.mock("POST", "/scan/text")
+    let mock = server.mock("POST", "/scan/text")
         .with_status(200)
         .with_body(r#"{"verdict":"MALICIOUS","sanitized_text":"","max_score":0.95,"chunks_scanned":1,"flagged_chunks":1,"scan_time_ms":5.0,"source":"animus"}"#)
         .create_async().await;
@@ -36,6 +36,7 @@ async fn malicious_verdict_blocks() {
     let bridge = TrollGuardBridge::new(&server.url());
     let result = bridge.scan("inject me", "animus").await;
     assert!(!result.is_clean);
+    mock.assert_async().await;
 }
 
 #[tokio::test]

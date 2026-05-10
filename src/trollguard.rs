@@ -15,9 +15,16 @@ pub struct TrollGuardBridge {
 
 #[derive(Debug, Clone)]
 pub struct ScanResult {
+    /// True if the verdict is SAFE or SUSPICIOUS (not MALICIOUS). Also true when TG is unavailable.
     pub is_clean: bool,
+    /// The text returned by TrollGuard after scanning. When `tg_unavailable=true`, this is the
+    /// raw input text (not scanned). Check `tg_unavailable` before assuming this is clean.
     pub sanitized_text: String,
+    /// TrollGuard's verdict string: "SAFE", "SUSPICIOUS", "MALICIOUS", "TG_UNAVAILABLE", or "TG_PARSE_ERROR".
+    /// Use this field to distinguish SUSPICIOUS from SAFE when routing decisions matter.
     pub verdict: String,
+    /// True when TrollGuard could not be reached or returned an unparseable response.
+    /// The turn is allowed through but downstream should treat `sanitized_text` as unscanned.
     pub tg_unavailable: bool,
 }
 
@@ -70,6 +77,7 @@ impl TrollGuardBridge {
                         }
                     }
                     Ok(scan) => {
+                        // SUSPICIOUS is allowed (flagged but not blocked); callers can inspect `verdict` to distinguish from SAFE.
                         let is_clean = scan.verdict == "SAFE" || scan.verdict == "SUSPICIOUS";
                         ScanResult {
                             is_clean,
