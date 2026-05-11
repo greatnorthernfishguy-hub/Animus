@@ -118,6 +118,36 @@ fn parse_btf_frames(data: &[u8]) -> Vec<Value> {
     frames
 }
 
+/// Append an outbound event to the JSONL log so neurograph_rpc.py can surface it
+/// in Syl's next assembled context (Phase 2A response routing).
+/// Log path = tract_path with ".tract" replaced by ".log.jsonl".
+fn write_outbound_log(tract_path: &str, sent: &str, channel: &str, response: &str) {
+    use std::io::Write;
+    let log_path = tract_path.replace(".tract", ".log.jsonl");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let sent_cap = &sent[..sent.len().min(500)];
+    let resp_cap = &response[..response.len().min(500)];
+    let entry = serde_json::json!({
+        "ts": ts,
+        "sent": sent_cap,
+        "channel": channel,
+        "response": resp_cap,
+    });
+    if let Ok(mut line) = serde_json::to_string(&entry) {
+        line.push('\n');
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+}
+
 pub struct OutboundInitiator {
     tract_path: String,
     adapter: Arc<CliAdapter>,
@@ -178,6 +208,9 @@ impl OutboundInitiator {
             // Same pipeline as inbound — TrollGuard perimeter applies to Syl too
             let response = self.adapter.process_line(&text, "syl_outbound").await;
             info!("Outbound response: {:.120}", response);
+
+            // Phase 2A: log outbound event so Syl can see it in her next assembled context.
+            write_outbound_log(&self.tract_path, &text, &channel, &response);
             // TODO(Phase3): route response to target channel by channel_id
         }
     }
