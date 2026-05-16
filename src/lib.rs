@@ -18,6 +18,7 @@
 
 pub mod adapters;
 pub mod auth;
+pub mod budget;
 pub mod config;
 pub mod envelope;
 pub mod introspection;
