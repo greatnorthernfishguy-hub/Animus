@@ -27,6 +27,18 @@ pub struct AnimusConfig {
     pub ws_port: u16,
     /// CES dashboard URL. Default: http://127.0.0.1:8847
     pub ces_url: String,
+    /// OpenRouter API key for budget polling. Set: OPENROUTER_API_KEY (optional)
+    pub openrouter_api_key: Option<String>,
+    /// Budget "low" threshold in USD. Default: 10.0. Set: ANIMUS_BUDGET_LOW_USD
+    pub budget_low_usd: f64,
+    /// Budget "critical" threshold in USD. Default: 2.0. Set: ANIMUS_BUDGET_CRITICAL_USD
+    pub budget_critical_usd: f64,
+    /// Budget poll interval in seconds. Default: 300. Set: ANIMUS_BUDGET_POLL_SECS
+    pub budget_poll_secs: u64,
+    /// SearXNG or similar search endpoint. Set: ANIMUS_SEARCH_URL (optional)
+    pub search_url: Option<String>,
+    /// Comma-separated allowed paths for read_file tool. Set: ANIMUS_ALLOWED_PATHS
+    pub allowed_paths: String,
 }
 
 impl AnimusConfig {
@@ -58,6 +70,24 @@ impl AnimusConfig {
             },
             ces_url: env::var("CES_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8847".to_string()),
+            openrouter_api_key: env::var("OPENROUTER_API_KEY").ok(),
+            budget_low_usd: env::var("ANIMUS_BUDGET_LOW_USD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10.0),
+            budget_critical_usd: env::var("ANIMUS_BUDGET_CRITICAL_USD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2.0),
+            budget_poll_secs: env::var("ANIMUS_BUDGET_POLL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
+            search_url: env::var("ANIMUS_SEARCH_URL").ok(),
+            allowed_paths: env::var("ANIMUS_ALLOWED_PATHS").unwrap_or_else(|_| {
+                let home = env::var("HOME").unwrap_or_default();
+                format!("{}/.et_modules,{}/docs", home, home)
+            }),
         })
     }
 }
@@ -87,5 +117,26 @@ mod tests {
         let result = AnimusConfig::from_env();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("ANIMUS_AUTH_TOKEN"));
+    }
+
+    #[test]
+    fn config_new_fields_have_correct_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ANIMUS_AUTH_TOKEN", "tok");
+        std::env::remove_var("OPENROUTER_API_KEY");
+        std::env::remove_var("ANIMUS_BUDGET_LOW_USD");
+        std::env::remove_var("ANIMUS_BUDGET_CRITICAL_USD");
+        std::env::remove_var("ANIMUS_BUDGET_POLL_SECS");
+        std::env::remove_var("ANIMUS_SEARCH_URL");
+        std::env::remove_var("ANIMUS_ALLOWED_PATHS");
+        let cfg = AnimusConfig::from_env().unwrap();
+        assert!(cfg.openrouter_api_key.is_none());
+        assert!((cfg.budget_low_usd - 10.0).abs() < 0.01);
+        assert!((cfg.budget_critical_usd - 2.0).abs() < 0.01);
+        assert_eq!(cfg.budget_poll_secs, 300);
+        assert!(cfg.search_url.is_none());
+        // ANIMUS_ALLOWED_PATHS default contains $HOME/.et_modules
+        assert!(cfg.allowed_paths.contains(".et_modules"));
+        std::env::remove_var("ANIMUS_AUTH_TOKEN");
     }
 }
