@@ -12,6 +12,7 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 
 #[async_trait]
@@ -32,7 +33,11 @@ impl ToolDispatcher {
         let home = std::env::var("HOME").unwrap_or_default();
 
         if let Ok(url) = std::env::var("ANIMUS_SEARCH_URL") {
-            tools.insert("web_search".into(), Box::new(WebSearchTool { endpoint: url }));
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_default();
+            tools.insert("web_search".into(), Box::new(WebSearchTool { endpoint: url, client }));
         }
 
         let allowed_paths = std::env::var("ANIMUS_ALLOWED_PATHS")
@@ -70,20 +75,14 @@ impl ToolDispatcher {
 
 struct WebSearchTool {
     endpoint: String,
+    client: reqwest::Client,
 }
 
 #[async_trait]
 impl ToolHandler for WebSearchTool {
     async fn invoke(&self, query: &str) -> String {
-        let client = match reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => return format!("[web_search build error: {}]", e),
-        };
-
-        let result = client
+        let result = self
+            .client
             .get(&self.endpoint)
             .query(&[("q", query), ("format", "json")])
             .send()
@@ -129,15 +128,32 @@ struct ReadFileTool {
 impl ToolHandler for ReadFileTool {
     async fn invoke(&self, query: &str) -> String {
         let path = query.trim();
+        let path_obj = match Path::new(path).canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                return format!(
+                    "[read_file: cannot resolve path '{}': {}]",
+                    path, e
+                )
+            }
+        };
+
         let allowed: Vec<&str> = self.allowed_paths.split(',').map(str::trim).collect();
-        let permitted = allowed.iter().any(|prefix| path.starts_with(prefix));
+        let permitted = allowed.iter().any(|prefix| {
+            Path::new(prefix)
+                .canonicalize()
+                .map(|p| path_obj.starts_with(&p))
+                .unwrap_or(false)
+        });
+
         if !permitted {
             return format!(
                 "[read_file: path '{}' not in allowed list — allowed prefixes: {}]",
                 path, self.allowed_paths
             );
         }
-        match std::fs::read_to_string(path) {
+
+        match std::fs::read_to_string(&path_obj) {
             Ok(content) => {
                 // Cap at 4000 chars — avoid overwhelming context
                 let cap = content
@@ -215,6 +231,7 @@ mod tests {
         let result = d
             .invoke("read_file", &format!("{}/nonexistent.txt", allowed))
             .await;
-        assert!(result.contains("read_file error"));
+        // canonicalize() fails on nonexistent paths
+        assert!(result.contains("cannot resolve path"));
     }
 }
