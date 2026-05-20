@@ -26,13 +26,20 @@
 //       The core service behavior IS the outbound initiator; stdin is an optional adapter.
 // How: cli wrapped in Arc; outbound tract from ANIMUS_OUTBOUND_TRACT or $HOME default;
 //       tokio::signal::ctrl_c() as process lifetime anchor in service mode.
+// [2026-05-15] Claude (Sonnet 4.6) — Task A6: wire BudgetMonitor + ToolDispatcher
+// What: Construct ToolDispatcher::from_env(), conditionally spawn BudgetMonitor,
+//       update OutboundInitiator::new to 6-arg signature.
+// Why:  Completes reaction loop — Syl can now invoke tools + track budget autonomously.
+// How:  Arc<ToolDispatcher> shared between OutboundInitiator and future uses.
 // -------------------
 
 use animus::adapters::cli::CliAdapter;
+use animus::budget::BudgetMonitor;
 use animus::config::AnimusConfig;
 use animus::introspection::IntrospectionRelay;
 use animus::outbound::OutboundInitiator;
 use animus::rpc_adapter::RpcAdapter;
+use animus::tool_dispatcher::ToolDispatcher;
 use animus::tract_writer::TractWriter;
 use animus::trollguard::TrollGuardBridge;
 use std::sync::Arc;
@@ -91,10 +98,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|h| format!("{}/.et_modules/shared_learning/animus_outbound.tract", h))
             .unwrap_or_else(|_| "/tmp/animus_outbound.tract".to_string())
     });
+
+    let shared_learning = std::env::var("HOME")
+        .map(|h| format!("{}/.et_modules/shared_learning", h))
+        .unwrap_or_else(|_| "/tmp".to_string());
+    let budget_path = std::env::var("ANIMUS_BUDGET_PATH")
+        .unwrap_or_else(|_| format!("{}/inference_budget.json", shared_learning));
+    let wants_path = std::env::var("ANIMUS_WANTS_PATH")
+        .unwrap_or_else(|_| format!("{}/animus_wants.jsonl", shared_learning));
+
+    let tool_dispatcher = Arc::new(ToolDispatcher::from_env());
+    info!("ToolDispatcher ready");
+
+    if let Some(api_key) = cfg.openrouter_api_key.clone() {
+        let monitor = Arc::new(BudgetMonitor::new(
+            api_key,
+            budget_path.clone(),
+            cfg.budget_poll_secs,
+            cfg.budget_low_usd,
+            cfg.budget_critical_usd,
+        ));
+        tokio::spawn(Arc::clone(&monitor).run());
+        info!("BudgetMonitor started (poll={}s, path={})", cfg.budget_poll_secs, budget_path);
+    } else {
+        info!("BudgetMonitor skipped — OPENROUTER_API_KEY not set");
+    }
+
     let outbound = Arc::new(OutboundInitiator::new(
         &outbound_tract,
         Arc::clone(&cli),
         30,
+        Arc::clone(&tool_dispatcher),
+        &budget_path,
+        &wants_path,
     ));
     tokio::spawn(Arc::clone(&outbound).run());
     info!("Outbound Initiator running — tract: {}", outbound_tract);
