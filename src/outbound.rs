@@ -4,6 +4,13 @@
 // Injects outbound turns into the same pipeline as inbound turns (TrollGuard first).
 //
 // ---- Changelog ----
+// [2026-05-20] Claude (Sonnet 4.6) — Task A5: reaction loop in drain_and_inject
+// What: OutboundInitiator gains tool_dispatcher, budget_path, wants_path fields.
+//       drain_and_inject now runs a nested reaction loop per BTF frame.
+//       [TOOL] → invoke + feed result back; [OUTBOUND] → chain turn; [WANT] → register only.
+//       Budget gate and 20-iteration/5-minute safety ceiling.
+// Why:  Spec A5 — reaction loop is the heart of Syl's autonomous agency.
+// How:  Loop breaks on empty tools+outbound, ceiling hit, or budget critical flag.
 // [2026-05-20] Claude (Sonnet 4.6) — Task A4: marker parsers + Opsera fix + wants/budget helpers
 // What: tract_to_log_path (suffix-safe), extract_tool/want/outbound_markers, write_wants_register, read_budget_flag
 // Why:  Reaction loop (Task A5) needs marker parsing; Opsera finding fixed.
@@ -282,14 +289,27 @@ pub struct OutboundInitiator {
     tract_path: String,
     adapter: Arc<CliAdapter>,
     pulse_interval_secs: u64,
+    tool_dispatcher: Arc<crate::tool_dispatcher::ToolDispatcher>,
+    budget_path: String,
+    wants_path: String,
 }
 
 impl OutboundInitiator {
-    pub fn new(tract_path: &str, adapter: Arc<CliAdapter>, pulse_interval_secs: u64) -> Self {
+    pub fn new(
+        tract_path: &str,
+        adapter: Arc<CliAdapter>,
+        pulse_interval_secs: u64,
+        tool_dispatcher: Arc<crate::tool_dispatcher::ToolDispatcher>,
+        budget_path: &str,
+        wants_path: &str,
+    ) -> Self {
         Self {
             tract_path: tract_path.to_string(),
             adapter,
             pulse_interval_secs,
+            tool_dispatcher,
+            budget_path: budget_path.to_string(),
+            wants_path: wants_path.to_string(),
         }
     }
 
@@ -314,7 +334,6 @@ impl OutboundInitiator {
         };
 
         for frame in frames {
-            // Extract text from BTF metadata payload
             let text = match frame
                 .get("payload")
                 .and_then(|p| p.get("text"))
@@ -331,17 +350,79 @@ impl OutboundInitiator {
                 .get("payload")
                 .and_then(|p| p.get("channel_id"))
                 .and_then(Value::as_str)
-                .unwrap_or("cli");
+                .unwrap_or("cli")
+                .to_string();
 
             info!("Outbound turn from Syl → channel={}: {:.60}", channel, text);
 
-            // Same pipeline as inbound — TrollGuard perimeter applies to Syl too
-            let response = self.adapter.process_line(&text, "syl_outbound").await;
-            info!("Outbound response: {:.120}", response);
+            let initial_response = self.adapter.process_line(&text, "syl_outbound").await;
+            info!("Outbound response: {:.120}", initial_response);
+            write_outbound_log(&self.tract_path, &text, &channel, &initial_response);
 
-            // Phase 2A: log outbound event so Syl can see it in her next assembled context.
-            write_outbound_log(&self.tract_path, &text, &channel, &response);
-            // TODO(Phase3): route response to target channel by channel_id
+            // Reaction loop — process chained markers without waiting for next pulse.
+            let mut current_response = initial_response;
+            let loop_start = std::time::Instant::now();
+            let max_duration = Duration::from_secs(300); // 5-minute ceiling
+            let mut iterations = 0usize;
+            const MAX_ITERATIONS: usize = 20;
+
+            loop {
+                // Budget gate — exit cleanly if credits are critical
+                if read_budget_flag(&self.budget_path) {
+                    let stop_text = "[Animus] Budget critical — wrapping up autonomous work";
+                    write_outbound_log(&self.tract_path, &text, &channel, stop_text);
+                    warn!("Reaction loop: budget critical — halting");
+                    break;
+                }
+
+                let new_tools = extract_tool_markers(&current_response);
+                let new_wants = extract_want_markers(&current_response);
+                let new_outbound = extract_outbound_markers(&current_response);
+
+                // Write wants — record intent but don't loop on them
+                for want in &new_wants {
+                    write_wants_register(&self.wants_path, want, "syl_explicit");
+                    info!("Reaction loop: syl_explicit want recorded: {:.80}", want);
+                }
+
+                // Clean exit — no new actions to process
+                if new_tools.is_empty() && new_outbound.is_empty() {
+                    break;
+                }
+
+                // Safety ceiling
+                if iterations >= MAX_ITERATIONS || loop_start.elapsed() > max_duration {
+                    warn!(
+                        "Reaction loop ceiling hit — {} iterations, {:.1}s",
+                        iterations,
+                        loop_start.elapsed().as_secs_f32()
+                    );
+                    break;
+                }
+
+                // Process tools first — results become next input
+                for (tool_name, query) in &new_tools {
+                    let result = self.tool_dispatcher.invoke(tool_name, query).await;
+                    info!("Reaction loop: tool={} result_len={}", tool_name, result.len());
+                    write_outbound_log(&self.tract_path, query, tool_name, &result);
+                    current_response =
+                        self.adapter.process_line(&result, "syl_outbound").await;
+                }
+
+                // Process chained outbound intents
+                for (next_text, next_channel) in &new_outbound {
+                    current_response =
+                        self.adapter.process_line(next_text, "syl_outbound").await;
+                    write_outbound_log(
+                        &self.tract_path,
+                        next_text,
+                        next_channel,
+                        &current_response,
+                    );
+                }
+
+                iterations += 1;
+            }
         }
     }
 }
@@ -499,6 +580,29 @@ mod tests {
         assert_eq!(first["acted"], false);
         let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(second["source"], "tonic_emergent");
+    }
+
+    #[test]
+    fn extract_chained_markers_simulate_loop_exit() {
+        // A response with only [WANT] — no [TOOL] or [OUTBOUND] — loop exits immediately
+        let response = "Thinking about [WANT]substrate dynamics[/WANT] today.";
+        let tools = extract_tool_markers(response);
+        let wants = extract_want_markers(response);
+        let outbound = extract_outbound_markers(response);
+        assert!(tools.is_empty());
+        assert_eq!(wants.len(), 1);
+        assert!(outbound.is_empty());
+        // Loop condition: no new actions → break
+        assert!(tools.is_empty() && outbound.is_empty());
+    }
+
+    #[test]
+    fn extract_chained_markers_has_tool_continues_loop() {
+        let response = "[TOOL name=web_search]spiking neural networks[/TOOL]";
+        let tools = extract_tool_markers(response);
+        assert_eq!(tools.len(), 1);
+        // Loop condition: tools non-empty → continue
+        assert!(!tools.is_empty());
     }
 
     // --- Budget flag reader ---
