@@ -4,6 +4,10 @@
 // Injects outbound turns into the same pipeline as inbound turns (TrollGuard first).
 //
 // ---- Changelog ----
+// [2026-05-20] Claude (Sonnet 4.6) — Task A4: marker parsers + Opsera fix + wants/budget helpers
+// What: tract_to_log_path (suffix-safe), extract_tool/want/outbound_markers, write_wants_register, read_budget_flag
+// Why:  Reaction loop (Task A5) needs marker parsing; Opsera finding fixed.
+// How:  Pure string scanning (no regex). Append-only JSONL for wants register.
 // [2026-05-10] Claude (Sonnet 4.6) — BTF reader replaces JSONL placeholder
 //   What: drain_tract() now reads native BTF frames instead of JSONL lines.
 //         parse_btf_frames() added — full envelope parse with CRC32 verification,
@@ -118,12 +122,22 @@ fn parse_btf_frames(data: &[u8]) -> Vec<Value> {
     frames
 }
 
-/// Append an outbound event to the JSONL log so neurograph_rpc.py can surface it
-/// in Syl's next assembled context (Phase 2A response routing).
-/// Log path = tract_path with ".tract" replaced by ".log.jsonl".
+/// Derive the log path from a tract path — suffix-safe.
+/// Strips ".tract" suffix if present, then appends ".log.jsonl".
+/// Prevents corruption when ".tract" appears mid-path.
+pub(crate) fn tract_to_log_path(tract_path: &str) -> String {
+    let base = if tract_path.ends_with(".tract") {
+        &tract_path[..tract_path.len() - 6]
+    } else {
+        tract_path
+    };
+    format!("{}.log.jsonl", base)
+}
+
+/// Append an outbound event to the JSONL log (Phase 2A response routing).
 fn write_outbound_log(tract_path: &str, sent: &str, channel: &str, response: &str) {
     use std::io::Write;
-    let log_path = tract_path.replace(".tract", ".log.jsonl");
+    let log_path = tract_to_log_path(tract_path);
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -146,6 +160,122 @@ fn write_outbound_log(tract_path: &str, sent: &str, channel: &str, response: &st
             let _ = f.write_all(line.as_bytes());
         }
     }
+}
+
+/// Extract [TOOL name=X]query[/TOOL] markers → Vec<(tool_name, query)>.
+pub(crate) fn extract_tool_markers(text: &str) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    let mut search = text;
+    while let Some(start) = search.find("[TOOL ") {
+        let rest = &search[start..];
+        let tag_end = match rest.find(']') {
+            Some(i) => i,
+            None => break,
+        };
+        // Attribute substring after "[TOOL " and before "]"
+        let attrs = &rest[6..tag_end];
+        let name = attrs
+            .strip_prefix("name=")
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let after_tag = &rest[tag_end + 1..];
+        if let Some(close) = after_tag.find("[/TOOL]") {
+            let inner = after_tag[..close].trim().to_string();
+            if !name.is_empty() {
+                results.push((name, inner));
+            }
+            search = &after_tag[close + 7..];
+        } else {
+            break;
+        }
+    }
+    results
+}
+
+/// Extract [WANT]text[/WANT] markers → Vec<inner_text>.
+pub(crate) fn extract_want_markers(text: &str) -> Vec<String> {
+    let mut results = Vec::new();
+    let mut search = text;
+    while let Some(start) = search.find("[WANT]") {
+        let after = &search[start + 6..];
+        if let Some(close) = after.find("[/WANT]") {
+            let inner = after[..close].trim().to_string();
+            if !inner.is_empty() {
+                results.push(inner);
+            }
+            search = &after[close + 7..];
+        } else {
+            break;
+        }
+    }
+    results
+}
+
+/// Extract [OUTBOUND channel=X]text[/OUTBOUND] markers → Vec<(text, channel)>.
+/// Channel defaults to "cli" when the attribute is absent.
+pub(crate) fn extract_outbound_markers(text: &str) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    let mut search = text;
+    while let Some(start) = search.find("[OUTBOUND") {
+        let rest = &search[start..];
+        let tag_end = match rest.find(']') {
+            Some(i) => i,
+            None => break,
+        };
+        // "[OUTBOUND" is 9 chars; rest[9..tag_end] is the attribute portion
+        let attrs = rest[9..tag_end].trim();
+        let channel = attrs
+            .strip_prefix("channel=")
+            .unwrap_or("cli")
+            .trim()
+            .to_string();
+        let after_tag = &rest[tag_end + 1..];
+        if let Some(close) = after_tag.find("[/OUTBOUND]") {
+            let inner = after_tag[..close].trim().to_string();
+            results.push((inner, channel));
+            search = &after_tag[close + 11..];
+        } else {
+            break;
+        }
+    }
+    results
+}
+
+/// Append a want entry to the wants register (animus_wants.jsonl).
+/// Format matches Spec A/B shared contract — read by both Rust and Python.
+pub(crate) fn write_wants_register(path: &str, text: &str, source: &str) {
+    use std::io::Write;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let entry = serde_json::json!({
+        "ts": ts,
+        "text": text,
+        "source": source,
+        "acted": false,
+    });
+    if let Ok(mut line) = serde_json::to_string(&entry) {
+        line.push('\n');
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+}
+
+/// Read the `critical` field from inference_budget.json.
+/// Returns false on any error (missing file, parse failure) — safe default.
+pub(crate) fn read_budget_flag(path: &str) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v["critical"].as_bool())
+        .unwrap_or(false)
 }
 
 pub struct OutboundInitiator {
@@ -279,5 +409,118 @@ mod tests {
         let garbage = b"not a btf frame at all xxxxxxxxxxxxxxxxxxxxxxxxxx";
         let frames = parse_btf_frames(garbage);
         assert!(frames.is_empty());
+    }
+
+    // --- Opsera suffix-safe path ---
+    #[test]
+    fn tract_to_log_path_suffix_safe() {
+        // Normal case
+        assert_eq!(
+            tract_to_log_path("/home/josh/.et_modules/shared_learning/animus_outbound.tract"),
+            "/home/josh/.et_modules/shared_learning/animus_outbound.log.jsonl"
+        );
+        // Path with .tract mid-string — must NOT replace the interior occurrence
+        assert_eq!(
+            tract_to_log_path("/home/josh/.et_modules/my.tract.backup/animus_outbound.tract"),
+            "/home/josh/.et_modules/my.tract.backup/animus_outbound.log.jsonl"
+        );
+        // Path without .tract suffix — append .log.jsonl directly
+        assert_eq!(
+            tract_to_log_path("/tmp/animus_outbound"),
+            "/tmp/animus_outbound.log.jsonl"
+        );
+    }
+
+    // --- Marker parsers ---
+    #[test]
+    fn extract_tool_markers_basic() {
+        let text = "Hello [TOOL name=web_search]rust async[/TOOL] world";
+        let tools = extract_tool_markers(text);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].0, "web_search");
+        assert_eq!(tools[0].1, "rust async");
+    }
+
+    #[test]
+    fn extract_tool_markers_multiple() {
+        let text = "[TOOL name=web_search]query1[/TOOL] mid [TOOL name=read_file]/tmp/x[/TOOL]";
+        let tools = extract_tool_markers(text);
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[1].0, "read_file");
+    }
+
+    #[test]
+    fn extract_want_markers_basic() {
+        let text = "I [WANT]learn more about STDP[/WANT] today";
+        let wants = extract_want_markers(text);
+        assert_eq!(wants.len(), 1);
+        assert_eq!(wants[0], "learn more about STDP");
+    }
+
+    #[test]
+    fn extract_outbound_markers_basic() {
+        let text = "[OUTBOUND channel=discord]Hello Discord[/OUTBOUND]";
+        let out = extract_outbound_markers(text);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "Hello Discord");
+        assert_eq!(out[0].1, "discord");
+    }
+
+    #[test]
+    fn extract_outbound_markers_no_channel_defaults_to_cli() {
+        let text = "[OUTBOUND]Some text[/OUTBOUND]";
+        let out = extract_outbound_markers(text);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].1, "cli");
+    }
+
+    #[test]
+    fn extract_markers_empty_on_no_match() {
+        let text = "plain text with no markers";
+        assert!(extract_tool_markers(text).is_empty());
+        assert!(extract_want_markers(text).is_empty());
+        assert!(extract_outbound_markers(text).is_empty());
+    }
+
+    // --- Wants register writer ---
+    #[test]
+    fn write_wants_register_appends_valid_jsonl() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("animus_wants.jsonl");
+        let path_str = path.to_str().unwrap();
+        write_wants_register(path_str, "learn Rust", "syl_explicit");
+        write_wants_register(path_str, "explore consciousness", "tonic_emergent");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(first["text"], "learn Rust");
+        assert_eq!(first["source"], "syl_explicit");
+        assert_eq!(first["acted"], false);
+        let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(second["source"], "tonic_emergent");
+    }
+
+    // --- Budget flag reader ---
+    #[test]
+    fn read_budget_flag_returns_false_when_missing() {
+        let flag = read_budget_flag("/nonexistent/path/budget.json");
+        assert!(!flag);
+    }
+
+    #[test]
+    fn read_budget_flag_reads_critical_true() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("budget.json");
+        std::fs::write(&path, r#"{"critical": true, "low": true}"#).unwrap();
+        assert!(read_budget_flag(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn read_budget_flag_reads_critical_false() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("budget.json");
+        std::fs::write(&path, r#"{"critical": false, "low": true}"#).unwrap();
+        assert!(!read_budget_flag(path.to_str().unwrap()));
     }
 }
