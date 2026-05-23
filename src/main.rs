@@ -31,13 +31,13 @@
 //       update OutboundInitiator::new to 6-arg signature.
 // Why:  Completes reaction loop — Syl can now invoke tools + track budget autonomously.
 // How:  Arc<ToolDispatcher> shared between OutboundInitiator and future uses.
-// [2026-05-22] Claude (Sonnet 4.6) — Bootstrap retry loop
-// What: When initial bootstrap is declined due to topology ownership, spawn a 30s
-//       retry loop. topology_owner.py clears the stale PID sentinel automatically
-//       when OpenClaw's process exits — the retry then claims and TonicBridge starts.
-// Why:  Bootstrap was fire-and-forget; a declined claim was never retried, so
-//       TonicBridge never started while OpenClaw was alive (the intended use case).
-// How:  Check response for bootstrapped:false; spawn tokio task with interval timer.
+// [2026-05-23] Claude (Sonnet 4.6) — Remove bootstrap call; peer-module rewrite
+// What: Removed NG bootstrap call. Animus is a peer module — it does not own
+//       the topology and must not attempt to bootstrap neurograph_rpc.py.
+// Why:  The bridge no longer spawns a neurograph_rpc.py subprocess (see bridge.py
+//       changelog). Calling bootstrap on the _NeurographAdapter is a no-op, but
+//       removing it clarifies that Animus has no bootstrap lifecycle with NG.
+// How:  Deleted rpc.call("bootstrap") and the retry loop added 2026-05-22.
 // -------------------
 
 use animus::adapters::cli::CliAdapter;
@@ -90,41 +90,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.tid_url.clone(),
     ));
 
-    // Bootstrap NeuroGraph — retry if topology is owned by another live process.
-    // topology_owner.py PID-checks the sentinel on every claim() call, so when
-    // OpenClaw's process exits the next retry will find a stale PID, clean the
-    // sentinel, claim ownership, and start TonicBridge automatically.
-    match rpc.call("bootstrap", serde_json::json!({})).await {
-        Err(e) => warn!("NeuroGraph bootstrap call failed: {} — continuing in degraded state", e),
-        Ok(resp) => {
-            if resp.get("bootstrapped").and_then(|v| v.as_bool()) == Some(false) {
-                let reason = resp["reason"].as_str().unwrap_or("unknown").to_string();
-                warn!("NeuroGraph bootstrap declined ({}) — retry loop starting every 30s", reason);
-                let rpc_retry = Arc::clone(&rpc);
-                tokio::spawn(async move {
-                    let mut interval = tokio::time::interval(
-                        tokio::time::Duration::from_secs(30),
-                    );
-                    interval.tick().await; // consume immediate first tick
-                    loop {
-                        interval.tick().await;
-                        match rpc_retry.call("bootstrap", serde_json::json!({})).await {
-                            Err(e) => warn!("Bootstrap retry RPC error: {}", e),
-                            Ok(r) => {
-                                if r.get("bootstrapped").and_then(|v| v.as_bool()) == Some(true) {
-                                    info!("Bootstrap retry succeeded — TonicBridge starting");
-                                    break;
-                                }
-                                info!("Bootstrap retry declined: {}", r["reason"].as_str().unwrap_or("unknown"));
-                            }
-                        }
-                    }
-                });
-            } else {
-                info!("NeuroGraph bootstrap succeeded");
-            }
-        }
-    }
+    // Animus is a peer module — it does not bootstrap NeuroGraph.
+    // Syl's neurograph_rpc.py (owned by OpenClaw) manages the topology lifecycle.
+    // bridge.py's _NeurographAdapter handles any stray bootstrap calls as a no-op.
 
     // Outbound Initiator — always running; gives Syl autonomous origination.
     // Drains the outbound tract on each pulse and injects turns into the full pipeline.
