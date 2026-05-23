@@ -31,6 +31,13 @@
 //       update OutboundInitiator::new to 6-arg signature.
 // Why:  Completes reaction loop — Syl can now invoke tools + track budget autonomously.
 // How:  Arc<ToolDispatcher> shared between OutboundInitiator and future uses.
+// [2026-05-22] Claude (Sonnet 4.6) — Bootstrap retry loop
+// What: When initial bootstrap is declined due to topology ownership, spawn a 30s
+//       retry loop. topology_owner.py clears the stale PID sentinel automatically
+//       when OpenClaw's process exits — the retry then claims and TonicBridge starts.
+// Why:  Bootstrap was fire-and-forget; a declined claim was never retried, so
+//       TonicBridge never started while OpenClaw was alive (the intended use case).
+// How:  Check response for bootstrapped:false; spawn tokio task with interval timer.
 // -------------------
 
 use animus::adapters::cli::CliAdapter;
@@ -83,12 +90,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.tid_url.clone(),
     ));
 
-    // Bootstrap NeuroGraph
-    if let Err(e) = rpc.call("bootstrap", serde_json::json!({})).await {
-        warn!(
-            "NeuroGraph bootstrap call failed: {} — continuing in degraded state",
-            e
-        );
+    // Bootstrap NeuroGraph — retry if topology is owned by another live process.
+    // topology_owner.py PID-checks the sentinel on every claim() call, so when
+    // OpenClaw's process exits the next retry will find a stale PID, clean the
+    // sentinel, claim ownership, and start TonicBridge automatically.
+    match rpc.call("bootstrap", serde_json::json!({})).await {
+        Err(e) => warn!("NeuroGraph bootstrap call failed: {} — continuing in degraded state", e),
+        Ok(resp) => {
+            if resp.get("bootstrapped").and_then(|v| v.as_bool()) == Some(false) {
+                let reason = resp["reason"].as_str().unwrap_or("unknown").to_string();
+                warn!("NeuroGraph bootstrap declined ({}) — retry loop starting every 30s", reason);
+                let rpc_retry = Arc::clone(&rpc);
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(
+                        tokio::time::Duration::from_secs(30),
+                    );
+                    interval.tick().await; // consume immediate first tick
+                    loop {
+                        interval.tick().await;
+                        match rpc_retry.call("bootstrap", serde_json::json!({})).await {
+                            Err(e) => warn!("Bootstrap retry RPC error: {}", e),
+                            Ok(r) => {
+                                if r.get("bootstrapped").and_then(|v| v.as_bool()) == Some(true) {
+                                    info!("Bootstrap retry succeeded — TonicBridge starting");
+                                    break;
+                                }
+                                info!("Bootstrap retry declined: {}", r["reason"].as_str().unwrap_or("unknown"));
+                            }
+                        }
+                    }
+                });
+            } else {
+                info!("NeuroGraph bootstrap succeeded");
+            }
+        }
     }
 
     // Outbound Initiator — always running; gives Syl autonomous origination.
