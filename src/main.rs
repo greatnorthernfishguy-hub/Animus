@@ -38,20 +38,24 @@
 //       changelog). Calling bootstrap on the _NeurographAdapter is a no-op, but
 //       removing it clarifies that Animus has no bootstrap lifecycle with NG.
 // How:  Deleted rpc.call("bootstrap") and the retry loop added 2026-05-22.
+// [2026-05-25] Claude (Sonnet 4.6) — Phase 1: wire TurnPipeline into CliAdapter
+// What: Remove RpcAdapter + IntrospectionRelay construction; add ContextBuilder + TurnPipeline
+// Why: Bridge subprocess eliminated in Phase 1; pipeline is now substrate-direct
+// How: TurnPipeline constructed from tg + context_builder + tract + tid_url, passed to CliAdapter
 // -------------------
 
 use animus::adapters::cli::CliAdapter;
 use animus::budget::BudgetMonitor;
 use animus::config::AnimusConfig;
-use animus::introspection::IntrospectionRelay;
+use animus::context_builder::ContextBuilder;
 use animus::outbound::OutboundInitiator;
-use animus::rpc_adapter::RpcAdapter;
+use animus::pipeline::TurnPipeline;
 use animus::tool_dispatcher::ToolDispatcher;
 use animus::tract_writer::TractWriter;
 use animus::trollguard::TrollGuardBridge;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
-use tracing::{info, warn};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -65,29 +69,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cfg = AnimusConfig::from_env().map_err(|e| format!("Config error: {}", e))?;
 
-    info!("Animus starting — bridge: {}", cfg.bridge_path);
+    info!("Animus starting — pipeline mode (substrate-direct)");
 
     let tg = Arc::new(TrollGuardBridge::new(&cfg.trollguard_url));
-    let rpc = Arc::new(
-        RpcAdapter::new(&cfg.bridge_path)
-            .await
-            .map_err(|e| format!("Bridge spawn failed: {}", e))?,
-    );
     let tract_path = format!("{}/animus.tract", cfg.tract_dir);
     let tract = Arc::new(TractWriter::new(&tract_path));
 
-    // Bunyan shared_learning_dir — HOME required (LAW 5)
-    let shared_learning_dir = std::env::var("HOME")
-        .map(|h| format!("{}/.et_modules/shared_learning", h))
-        .map_err(|_| "HOME env var not set — cannot locate Bunyan shared_learning dir")?;
-    let relay = Arc::new(IntrospectionRelay::new(&cfg.ces_url, &shared_learning_dir));
+    let context_builder = Arc::new(ContextBuilder::new());
+    let pipeline = Arc::new(TurnPipeline::new(
+        Arc::clone(&tg),
+        Arc::clone(&context_builder),
+        Arc::clone(&tract),
+        cfg.tid_url.clone(),
+    ));
 
     let cli = Arc::new(CliAdapter::new(
-        Arc::clone(&tg),
-        Arc::clone(&rpc),
+        Arc::clone(&pipeline),
         Arc::clone(&tract),
-        Arc::clone(&relay),
-        cfg.tid_url.clone(),
     ));
 
     // Animus is a peer module — it does not bootstrap NeuroGraph.
