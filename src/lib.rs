@@ -22,9 +22,14 @@
 // What: Added pub mod context_builder (ContextBuilder stub) and pub mod pipeline (TurnPipeline)
 // Why: Phase 1 bridge removal — new modules replace rpc.call("assemble"/"ingest"/"afterTurn")
 // How: Two new module declarations; pub mod rpc_adapter removed in Task 4 (same Phase 1)
+// [2026-05-25] Claude (Sonnet 4.6) — Phase 2: agent_runner module
+// What: Added pub mod agent_runner
+// Why: AgentRunner (RUN phase handler) must be accessible from integration tests
+// How: Simple module declaration
 // -------------------
 
 pub mod adapters;
+pub mod agent_runner;
 pub mod auth;
 pub mod budget;
 pub mod config;
