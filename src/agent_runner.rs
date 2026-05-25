@@ -60,11 +60,14 @@ impl AgentRunner {
             let response = self.call_tid_oai(&messages, &tool_defs).await;
 
             let choice = match response["choices"].as_array().and_then(|c| c.first()) {
-                Some(c) => c.clone(),
+                Some(c) => c,
                 None => return "[TID: malformed response]".to_string(),
             };
 
-            let finish_reason = choice["finish_reason"].as_str().unwrap_or("stop");
+            let finish_reason = choice["finish_reason"].as_str().unwrap_or_else(|| {
+                warn!("TID response missing finish_reason — treating as stop");
+                "stop"
+            });
             let message = choice["message"].clone();
             messages.push(message.clone());
 
