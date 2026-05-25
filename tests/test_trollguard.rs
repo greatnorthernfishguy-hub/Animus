@@ -2,6 +2,10 @@
 // Integration tests for TrollGuard HTTP bridge
 //
 // ---- Changelog ----
+// 2026-05-25 Claude (Sonnet 4.6) — Replace hardcoded port 19999 with MockServer drop pattern
+// What: trollguard_down_allows_with_flag uses start+drop to get a guaranteed free closed port
+// Why: Port 19999 could be in use; MockServer drop pattern is reliable across all environments
+// How: Let closed_port = { let s = MockServer::start(); s.port() } — same as pipeline.rs
 // 2026-05-10 Task6/trollguard — Integration tests for TrollGuard perimeter scan
 // What: Three async tests for TrollGuard bridge using mockito mock server
 // Why: Verify graceful fallback when TG unavailable, and correct verdict handling
@@ -9,6 +13,7 @@
 // -------------------
 
 use animus::trollguard::TrollGuardBridge;
+use httpmock::prelude::*;
 
 #[tokio::test]
 async fn safe_verdict_passes() {
@@ -41,8 +46,8 @@ async fn malicious_verdict_blocks() {
 
 #[tokio::test]
 async fn trollguard_down_allows_with_flag() {
-    // Port 19999 has nothing listening — simulates TG unavailable
-    let bridge = TrollGuardBridge::new("http://127.0.0.1:19999");
+    let closed_port = { let s = MockServer::start(); s.port() };
+    let bridge = TrollGuardBridge::new(&format!("http://127.0.0.1:{}", closed_port));
     let result = bridge.scan("hello", "animus").await;
     assert!(result.is_clean);        // allow through when TG is down
     assert!(result.tg_unavailable);  // but flag it

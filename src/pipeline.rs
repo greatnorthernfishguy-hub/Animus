@@ -1,5 +1,12 @@
 // src/pipeline.rs
 // ---- Changelog ----
+// 2026-05-25 Claude (Sonnet 4.6) — Fix SUSPICIOUS collapse + test port hardcoding
+// What: Split tg_pass/tg_suspicious deposits by verdict; replace hardcoded TID port in test
+// Why: SUSPICIOUS verdict was silently collapsed into tg_pass, hiding signal from River consumers
+//      (Law 7 — substrate must receive richest possible signal, not flattened labels).
+//      Hardcoded port 7437 in filter_blocks_malicious_text test is inconsistent with other tests.
+// How: pass_event chosen per verdict; test uses unused MockServer for a valid base_url
+//
 // 2026-05-25 Claude (Sonnet 4.6) — Fix INGEST ordering + test port reliability
 // What: Move turn_ingest deposit to pre-BUILD; replace hardcoded port 19999 with MockServer drop pattern
 // Why: Substrate must receive raw input before it is acted upon (Law 7). Phase 3 spreading
@@ -71,7 +78,8 @@ impl TurnPipeline {
             return format!("[TrollGuard blocked: {}]", scan.verdict);
         }
         let clean_text = scan.sanitized_text;
-        self.tract.deposit_event_silent("tg_pass", serde_json::json!({
+        let pass_event = if scan.verdict == "SUSPICIOUS" { "tg_suspicious" } else { "tg_pass" };
+        self.tract.deposit_event_silent(pass_event, serde_json::json!({
             "verdict": scan.verdict,
             "channel_id": ctx.channel_id,
         }));
@@ -145,7 +153,8 @@ mod tests {
                 "sanitized_text": "blocked"
             }));
         });
-        let pipeline = make_pipeline(&tg_server.base_url(), "http://127.0.0.1:7437");
+        let tid_server = MockServer::start(); // TID never called — FILTER blocks first
+        let pipeline = make_pipeline(&tg_server.base_url(), &tid_server.base_url());
         let ctx = TurnContext {
             text: "inject payload".to_string(),
             channel_id: "cli".to_string(),
