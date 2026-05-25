@@ -18,6 +18,10 @@
 // What: Added pub mod tool_dispatcher for tool registry and async handlers
 // Why: Reaction loop (Task 5) routes [TOOL name=X]query[/TOOL] to handlers
 // How: ToolHandler trait + ToolDispatcher registry. Web search + read_file.
+// [2026-05-25] Claude (Sonnet 4.6) — Phase 1: context_builder + pipeline modules
+// What: Added pub mod context_builder (ContextBuilder stub) and pub mod pipeline (TurnPipeline)
+// Why: Phase 1 bridge removal — new modules replace rpc.call("assemble"/"ingest"/"afterTurn")
+// How: Two new module declarations; pub mod rpc_adapter removed in Task 4 (same Phase 1)
 // -------------------
 
 pub mod adapters;
