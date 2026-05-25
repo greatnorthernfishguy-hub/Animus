@@ -28,6 +28,7 @@ pub mod context_builder;
 pub mod envelope;
 pub mod introspection;
 pub mod outbound;
+pub mod pipeline;
 pub mod rpc_adapter;
 pub mod tool_dispatcher;
 pub mod tract_writer;
