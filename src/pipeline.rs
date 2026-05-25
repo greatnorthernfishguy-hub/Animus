@@ -1,5 +1,12 @@
 // src/pipeline.rs
 // ---- Changelog ----
+// 2026-05-25 Claude (Sonnet 4.6) — Fix INGEST ordering + test port reliability
+// What: Move turn_ingest deposit to pre-BUILD; replace hardcoded port 19999 with MockServer drop pattern
+// Why: Substrate must receive raw input before it is acted upon (Law 7). Phase 3 spreading
+//      activation reads from the substrate during BUILD — input must be there first.
+//      Port 19999 could be in use; MockServer start+drop guarantees a free closed port.
+// How: Deposit turn_ingest immediately after FILTER/tg_pass, before ContextBuilder.build()
+//
 // 2026-05-25 Claude (Sonnet 4.6) — Phase 1: TurnPipeline state machine
 // What: RECEIVE→FILTER→BUILD→ROUTE→RUN→INGEST→RESPOND→DONE pipeline
 // Why: Replaces rpc.call("ingest"/"assemble"/"afterTurn"); substrate-direct via TractWriter
@@ -69,18 +76,20 @@ impl TurnPipeline {
             "channel_id": ctx.channel_id,
         }));
 
-        // BUILD — ContextBuilder stub; Phase 3 wires spreading activation assemble()
-        let system_prompt = self.context_builder.build(&clean_text).await;
-
-        // ROUTE + RUN — TID owns model selection + provider fallback (hook slot _50_tid_route)
-        let response = self.call_tid(&clean_text, &system_prompt).await;
-
-        // INGEST — raw experience deposit, Law 7: no classification before deposit
+        // INGEST — raw experience deposit pre-BUILD, Law 7: substrate receives input before it is
+        // acted upon. Phase 3 spreading activation reads from the substrate during BUILD — the
+        // current turn's text must already be there.
         self.tract.deposit_event_silent("turn_ingest", serde_json::json!({
             "text": clean_text,
             "channel_id": ctx.channel_id,
             "user_id": ctx.user_id,
         }));
+
+        // BUILD — ContextBuilder stub; Phase 3 wires spreading activation assemble()
+        let system_prompt = self.context_builder.build(&clean_text).await;
+
+        // ROUTE + RUN — TID owns model selection + provider fallback (hook slot _50_tid_route)
+        let response = self.call_tid(&clean_text, &system_prompt).await;
 
         // RESPOND
         self.tract.deposit_event_silent("turn_complete", serde_json::json!({
@@ -177,7 +186,11 @@ mod tests {
 
     #[tokio::test]
     async fn tg_unavailable_proceeds_with_original_text() {
-        // Port 19999 — nothing listening, connection refused → tg_unavailable=true
+        // Start MockServer, capture port, drop it — port is guaranteed closed
+        let closed_port = {
+            let s = MockServer::start();
+            s.port()
+        };
         let tid_server = MockServer::start();
         tid_server.mock(|when, then| {
             when.method(POST).path("/chat");
@@ -185,7 +198,10 @@ mod tests {
                 "content": "got it"
             }));
         });
-        let pipeline = make_pipeline("http://127.0.0.1:19999", &tid_server.base_url());
+        let pipeline = make_pipeline(
+            &format!("http://127.0.0.1:{}", closed_port),
+            &tid_server.base_url(),
+        );
         let ctx = TurnContext {
             text: "hello".to_string(),
             channel_id: "cli".to_string(),
