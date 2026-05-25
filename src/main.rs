@@ -42,9 +42,14 @@
 // What: Remove RpcAdapter + IntrospectionRelay construction; add ContextBuilder + TurnPipeline
 // Why: Bridge subprocess eliminated in Phase 1; pipeline is now substrate-direct
 // How: TurnPipeline constructed from tg + context_builder + tract + tid_url, passed to CliAdapter
+// [2026-05-25] Claude (Sonnet 4.6) — Phase 2: wire AgentRunner into TurnPipeline
+// What: Construct AgentRunner from ToolDispatcher + tid_url; pass to TurnPipeline::new()
+// Why: TurnPipeline now delegates RUN phase to AgentRunner (multi-turn tool loop)
+// How: ToolDispatcher constructed first; AgentRunner wraps it; ANIMUS_AGENT_MAX_ITER controls cap
 // -------------------
 
 use animus::adapters::cli::CliAdapter;
+use animus::agent_runner::AgentRunner;
 use animus::budget::BudgetMonitor;
 use animus::config::AnimusConfig;
 use animus::context_builder::ContextBuilder;
@@ -76,11 +81,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tract = Arc::new(TractWriter::new(&tract_path));
 
     let context_builder = Arc::new(ContextBuilder::new());
+
+    let tool_dispatcher = Arc::new(ToolDispatcher::from_env());
+    info!("ToolDispatcher ready");
+
+    let max_iter = std::env::var("ANIMUS_AGENT_MAX_ITER")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(8);
+    let agent_runner = Arc::new(AgentRunner::new(
+        Arc::clone(&tool_dispatcher),
+        cfg.tid_url.clone(),
+        max_iter,
+    ));
+
     let pipeline = Arc::new(TurnPipeline::new(
         Arc::clone(&tg),
         Arc::clone(&context_builder),
         Arc::clone(&tract),
-        cfg.tid_url.clone(),
+        Arc::clone(&agent_runner),
     ));
 
     let cli = Arc::new(CliAdapter::new(
@@ -106,9 +125,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| format!("{}/inference_budget.json", shared_learning));
     let wants_path = std::env::var("ANIMUS_WANTS_PATH")
         .unwrap_or_else(|_| format!("{}/animus_wants.jsonl", shared_learning));
-
-    let tool_dispatcher = Arc::new(ToolDispatcher::from_env());
-    info!("ToolDispatcher ready");
 
     if let Some(api_key) = cfg.openrouter_api_key.clone() {
         let monitor = Arc::new(BudgetMonitor::new(

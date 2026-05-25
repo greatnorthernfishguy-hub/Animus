@@ -1,5 +1,11 @@
 // src/pipeline.rs
 // ---- Changelog ----
+// 2026-05-25 Claude (Sonnet 4.6) — Phase 2: wire AgentRunner, fix TID endpoint + format
+// What: Replace tid_client/tid_url + call_tid() with Arc<AgentRunner>
+// Why: call_tid() called POST /chat (404 in prod) with "system" field (ignored by TID).
+//      AgentRunner fixes: /v1/chat/completions, system as {role:"system"} message.
+// How: TurnPipeline::new() takes Arc<AgentRunner>; run() constructs AgentRunSpec + delegates
+//
 // 2026-05-25 Claude (Sonnet 4.6) — Fix SUSPICIOUS collapse + test port hardcoding
 // What: Split tg_pass/tg_suspicious deposits by verdict; replace hardcoded TID port in test
 // Why: SUSPICIOUS verdict was silently collapsed into tg_pass, hiding signal from River consumers
@@ -21,6 +27,7 @@
 //      (_50_), TractWriter BTF deposit at INGEST — no subprocess bridge
 // -------------------
 
+use crate::agent_runner::{AgentRunSpec, AgentRunner};
 use crate::context_builder::ContextBuilder;
 use crate::tract_writer::TractWriter;
 use crate::trollguard::TrollGuardBridge;
@@ -44,8 +51,7 @@ pub struct TurnPipeline {
     trollguard: Arc<TrollGuardBridge>,
     context_builder: Arc<ContextBuilder>,
     tract: Arc<TractWriter>,
-    tid_client: reqwest::Client,
-    tid_url: String,
+    agent_runner: Arc<AgentRunner>,
 }
 
 impl TurnPipeline {
@@ -53,13 +59,9 @@ impl TurnPipeline {
         trollguard: Arc<TrollGuardBridge>,
         context_builder: Arc<ContextBuilder>,
         tract: Arc<TractWriter>,
-        tid_url: String,
+        agent_runner: Arc<AgentRunner>,
     ) -> Self {
-        let tid_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .expect("failed to build TID HTTP client");
-        Self { trollguard, context_builder, tract, tid_url, tid_client }
+        Self { trollguard, context_builder, tract, agent_runner }
     }
 
     pub async fn run(&self, ctx: TurnContext) -> String {
@@ -97,7 +99,10 @@ impl TurnPipeline {
         let system_prompt = self.context_builder.build(&clean_text).await;
 
         // ROUTE + RUN — TID owns model selection + provider fallback (hook slot _50_tid_route)
-        let response = self.call_tid(&clean_text, &system_prompt).await;
+        let response = self.agent_runner.run(AgentRunSpec {
+            messages: vec![serde_json::json!({"role": "user", "content": clean_text})],
+            system_prompt,
+        }).await;
 
         // RESPOND
         self.tract.deposit_event_silent("turn_complete", serde_json::json!({
@@ -107,31 +112,14 @@ impl TurnPipeline {
 
         response
     }
-
-    async fn call_tid(&self, text: &str, system_prompt: &str) -> String {
-        let body = serde_json::json!({
-            "messages": [{"role": "user", "content": text}],
-            "system": system_prompt,
-        });
-        match self.tid_client.post(format!("{}/chat", self.tid_url)).json(&body).send().await {
-            Ok(resp) => {
-                resp.json::<serde_json::Value>().await
-                    .ok()
-                    .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
-                    .unwrap_or_else(|| "[TID: empty response]".to_string())
-            }
-            Err(e) => {
-                warn!("TID unavailable: {} — no fallback configured", e);
-                "[TID unavailable]".to_string()
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_runner::AgentRunner;
     use crate::context_builder::ContextBuilder;
+    use crate::tool_dispatcher::ToolDispatcher;
     use crate::tract_writer::TractWriter;
     use crate::trollguard::TrollGuardBridge;
     use httpmock::prelude::*;
@@ -140,7 +128,9 @@ mod tests {
         let tg = Arc::new(TrollGuardBridge::new(tg_url));
         let cb = Arc::new(ContextBuilder::new());
         let tract = Arc::new(TractWriter::new("/tmp/test_animus_pipeline.tract"));
-        TurnPipeline::new(tg, cb, tract, tid_url.to_string())
+        let dispatcher = Arc::new(ToolDispatcher::from_env());
+        let runner = Arc::new(AgentRunner::new(dispatcher, tid_url.to_string(), 8));
+        TurnPipeline::new(tg, cb, tract, runner)
     }
 
     #[tokio::test]
@@ -177,9 +167,16 @@ mod tests {
         });
         let tid_server = MockServer::start();
         tid_server.mock(|when, then| {
-            when.method(POST).path("/chat");
+            when.method(POST).path("/v1/chat/completions");
             then.status(200).json_body(serde_json::json!({
-                "content": "Hello there!"
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "Hello there!"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}
             }));
         });
         let pipeline = make_pipeline(&tg_server.base_url(), &tid_server.base_url());
@@ -195,16 +192,22 @@ mod tests {
 
     #[tokio::test]
     async fn tg_unavailable_proceeds_with_original_text() {
-        // Start MockServer, capture port, drop it — port is guaranteed closed
         let closed_port = {
             let s = MockServer::start();
             s.port()
         };
         let tid_server = MockServer::start();
         tid_server.mock(|when, then| {
-            when.method(POST).path("/chat");
+            when.method(POST).path("/v1/chat/completions");
             then.status(200).json_body(serde_json::json!({
-                "content": "got it"
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "got it"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}
             }));
         });
         let pipeline = make_pipeline(
