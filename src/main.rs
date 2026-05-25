@@ -88,9 +88,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&tract),
     ));
 
-    // Animus is a peer module — it does not bootstrap NeuroGraph.
+    // Animus is a peer module — it does not own or bootstrap the NeuroGraph topology.
     // Syl's neurograph_rpc.py (owned by OpenClaw) manages the topology lifecycle.
-    // bridge.py's _NeurographAdapter handles any stray bootstrap calls as a no-op.
 
     // Outbound Initiator — always running; gives Syl autonomous origination.
     // Drains the outbound tract on each pulse and injects turns into the full pipeline.
