@@ -18,6 +18,7 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
+use tracing::warn;
 use std::path::Path;
 use std::time::Duration;
 
@@ -223,7 +224,10 @@ impl ToolHandler for ReadFileTool {
             Path::new(prefix)
                 .canonicalize()
                 .map(|p| path_obj.starts_with(&p))
-                .unwrap_or(false)
+                .unwrap_or_else(|e| {
+                    warn!("ANIMUS_ALLOWED_PATHS prefix '{}' cannot be resolved: {}", prefix, e);
+                    false
+                })
         });
 
         if !permitted {

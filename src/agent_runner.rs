@@ -26,8 +26,8 @@ pub struct AgentRunSpec {
 pub struct AgentRunner {
     tool_dispatcher: Arc<ToolDispatcher>,
     client: reqwest::Client,
-    pub tid_url: String,
-    pub max_iter: usize,
+    tid_url: String,
+    max_iter: usize,
 }
 
 impl AgentRunner {
@@ -90,7 +90,9 @@ impl AgentRunner {
                 let args: serde_json::Value = serde_json::from_str(args_str)
                     .unwrap_or_else(|_| serde_json::json!({}));
 
-                // Dedup guard: suppress identical (name, canonical_args) within one turn
+                // Dedup guard: suppress identical (name, canonical_args) across the entire run.
+                // Per-run scope is intentional — prevents the model from looping on the same
+                // tool call across multiple iterations when it is stuck.
                 let canonical = serde_json::to_string(&args).unwrap_or_default();
                 let dedup_key = format!("{tool_name}:{canonical}");
                 let content = if !seen.insert(dedup_key) {
