@@ -3,6 +3,10 @@
 // What: Env-var-backed config struct with typed fields and defaults
 // Why: Law 5 — all config from .bashrc/environment, no hardcoded values
 // How: std::env::var() with sensible defaults; only ANIMUS_AUTH_TOKEN is required
+// [2026-05-25] Claude (Sonnet 4.6) — Phase 1: remove bridge_path + neurograph_rpc_path
+// What: Removed bridge_path and neurograph_rpc_path from AnimusConfig
+// Why: bridge.py subprocess eliminated in Phase 1 — these fields have no consumers
+// How: Fields + from_env() assignments removed; env var ANIMUS_BRIDGE_PATH no longer read
 // -------------------
 
 use std::env;
@@ -15,10 +19,6 @@ pub struct AnimusConfig {
     pub trollguard_url: String,
     /// TID HTTP base URL. Default: http://127.0.0.1:7437
     pub tid_url: String,
-    /// Absolute path to neurograph_rpc.py. Default: $HOME/NeuroGraph/neurograph_rpc.py
-    pub neurograph_rpc_path: String,
-    /// Absolute path to animus_bridge/bridge.py. Default: $HOME/Animus/animus_bridge/bridge.py
-    pub bridge_path: String,
     /// Discord bot token (optional — Discord adapter disabled if unset). Set: DISCORD_TOKEN
     pub discord_token: Option<String>,
     /// Directory for Animus module tract files. Default: ~/.et_modules/shared_learning
@@ -56,10 +56,6 @@ impl AnimusConfig {
                 .unwrap_or_else(|_| "http://127.0.0.1:7438".to_string()),
             tid_url: env::var("TID_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:7437".to_string()),
-            neurograph_rpc_path: env::var("NEUROGRAPH_RPC_PATH")
-                .unwrap_or_else(|_| format!("{}/NeuroGraph/neurograph_rpc.py", home)),
-            bridge_path: env::var("ANIMUS_BRIDGE_PATH")
-                .unwrap_or_else(|_| format!("{}/Animus/animus_bridge/bridge.py", home)),
             discord_token: env::var("DISCORD_TOKEN").ok(),
             tract_dir: env::var("ANIMUS_TRACT_DIR").unwrap_or(default_tract_dir),
             ws_port: {
