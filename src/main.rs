@@ -46,6 +46,10 @@
 // What: Construct AgentRunner from ToolDispatcher + tid_url; pass to TurnPipeline::new()
 // Why: TurnPipeline now delegates RUN phase to AgentRunner (multi-turn tool loop)
 // How: ToolDispatcher constructed first; AgentRunner wraps it; ANIMUS_AGENT_MAX_ITER controls cap
+// [2026-05-25] Claude (Sonnet 4.6) — Phase 3: pass ng_url to ContextBuilder
+// What: ContextBuilder::new() now takes ng_url from AnimusConfig
+// Why: ContextBuilder needs the NeuroGraph sidecar URL to call POST /assemble
+// How: cfg.ng_url.clone() passed — reads NEUROGRAPH_URL env (default 127.0.0.1:8850)
 // -------------------
 
 use animus::adapters::cli::CliAdapter;
@@ -80,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tract_path = format!("{}/animus.tract", cfg.tract_dir);
     let tract = Arc::new(TractWriter::new(&tract_path));
 
-    let context_builder = Arc::new(ContextBuilder::new());
+    let context_builder = Arc::new(ContextBuilder::new(cfg.ng_url.clone()));
 
     let tool_dispatcher = Arc::new(ToolDispatcher::from_env());
     info!("ToolDispatcher ready");

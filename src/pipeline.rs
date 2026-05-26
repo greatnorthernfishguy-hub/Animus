@@ -126,7 +126,8 @@ mod tests {
 
     fn make_pipeline(tg_url: &str, tid_url: &str) -> TurnPipeline {
         let tg = Arc::new(TrollGuardBridge::new(tg_url));
-        let cb = Arc::new(ContextBuilder::new());
+        // Port 1 = always connection-refused; ContextBuilder returns "" gracefully (stub parity)
+        let cb = Arc::new(ContextBuilder::new("http://127.0.0.1:1".to_string()));
         let tract = Arc::new(TractWriter::new("/tmp/test_animus_pipeline.tract"));
         let dispatcher = Arc::new(ToolDispatcher::from_env());
         let runner = Arc::new(AgentRunner::new(dispatcher, tid_url.to_string(), 8));
