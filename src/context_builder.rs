@@ -9,6 +9,11 @@
 // What: Replace stub with reqwest HTTP client calling NeuroGraph POST /assemble
 // Why: Spec Phase 3 — system prompt built from live substrate associations
 // How: 10s-timeout reqwest::Client, graceful degradation (warn! + "" on any failure)
+//
+// 2026-05-26 Claude (Sonnet 4.6) — HTTP status check + test hardening
+// What: Warn and return empty on non-200; add non-200 test; tighten body assertion
+// Why: Code review issues 2, 3, 4 — silent wrong-body success on server errors
+// How: resp.status().is_success() guard before JSON parse; new mock test; body_contains("test input")
 // -------------------
 
 use tracing::warn;
@@ -37,14 +42,20 @@ impl ContextBuilder {
             .send()
             .await
         {
-            Ok(resp) => match resp.json::<serde_json::Value>().await {
-                Ok(j) => j["systemPromptAddition"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string(),
-                Err(e) => {
-                    warn!("NG assemble parse error: {}", e);
-                    String::new()
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    warn!("NG assemble HTTP {}", resp.status());
+                    return String::new();
+                }
+                match resp.json::<serde_json::Value>().await {
+                    Ok(j) => j["systemPromptAddition"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                    Err(e) => {
+                        warn!("NG assemble parse error: {}", e);
+                        String::new()
+                    }
                 }
             },
             Err(e) => {
@@ -105,7 +116,8 @@ mod tests {
                 .path("/assemble")
                 .body_contains(r#""role""#)
                 .body_contains(r#""user""#)
-                .body_contains(r#""messages""#);
+                .body_contains(r#""messages""#)
+                .body_contains("test input");
             then.status(200).json_body(serde_json::json!({
                 "systemPromptAddition": "ok"
             }));
@@ -113,5 +125,16 @@ mod tests {
         let cb = make_cb(&server.base_url());
         let result = cb.build("test input").await;
         assert_eq!(result, "ok");
+    }
+
+    #[tokio::test]
+    async fn assemble_non_200_returns_empty() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/assemble");
+            then.status(500).json_body(serde_json::json!({"error": "internal"}));
+        });
+        let cb = make_cb(&server.base_url());
+        assert!(cb.build("hello").await.is_empty());
     }
 }
