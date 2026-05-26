@@ -1,12 +1,16 @@
 // ---- Changelog ----
-// 2026-05-10 Task3/config — AnimusConfig reads all credentials from environment
-// What: Env-var-backed config struct with typed fields and defaults
-// Why: Law 5 — all config from .bashrc/environment, no hardcoded values
-// How: std::env::var() with sensible defaults; only ANIMUS_AUTH_TOKEN is required
+// [2026-05-25] Claude (Sonnet 4.6) — Phase 3: add ng_url field
+// What: New field ng_url reads NEUROGRAPH_URL env var (default http://127.0.0.1:8850)
+// Why: ContextBuilder needs the NeuroGraph HTTP sidecar URL (Law 5 — config from env)
+// How: Optional env var with hardcoded default matching NG's sidecar listen port
 // [2026-05-25] Claude (Sonnet 4.6) — Phase 1: remove bridge_path + neurograph_rpc_path
 // What: Removed bridge_path and neurograph_rpc_path from AnimusConfig
 // Why: bridge.py subprocess eliminated in Phase 1 — these fields have no consumers
 // How: Fields + from_env() assignments removed; env var ANIMUS_BRIDGE_PATH no longer read
+// 2026-05-10 Task3/config — AnimusConfig reads all credentials from environment
+// What: Env-var-backed config struct with typed fields and defaults
+// Why: Law 5 — all config from .bashrc/environment, no hardcoded values
+// How: std::env::var() with sensible defaults; only ANIMUS_AUTH_TOKEN is required
 // -------------------
 
 use std::env;
@@ -39,6 +43,8 @@ pub struct AnimusConfig {
     pub search_url: Option<String>,
     /// Comma-separated allowed paths for read_file tool. Set: ANIMUS_ALLOWED_PATHS
     pub allowed_paths: String,
+    /// NeuroGraph HTTP sidecar base URL. Default: http://127.0.0.1:8850. Set: NEUROGRAPH_URL
+    pub ng_url: String,
 }
 
 impl AnimusConfig {
@@ -84,6 +90,8 @@ impl AnimusConfig {
                 let home = env::var("HOME").unwrap_or_default();
                 format!("{}/.et_modules,{}/docs", home, home)
             }),
+            ng_url: env::var("NEUROGRAPH_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:8850".to_string()),
         })
     }
 }
@@ -134,5 +142,26 @@ mod tests {
         // ANIMUS_ALLOWED_PATHS default contains $HOME/.et_modules
         assert!(cfg.allowed_paths.contains(".et_modules"));
         std::env::remove_var("ANIMUS_AUTH_TOKEN");
+    }
+
+    #[test]
+    fn config_ng_url_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ANIMUS_AUTH_TOKEN", "tok");
+        std::env::remove_var("NEUROGRAPH_URL");
+        let cfg = AnimusConfig::from_env().unwrap();
+        assert_eq!(cfg.ng_url, "http://127.0.0.1:8850");
+        std::env::remove_var("ANIMUS_AUTH_TOKEN");
+    }
+
+    #[test]
+    fn config_ng_url_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ANIMUS_AUTH_TOKEN", "tok");
+        std::env::set_var("NEUROGRAPH_URL", "http://192.168.1.10:8850");
+        let cfg = AnimusConfig::from_env().unwrap();
+        assert_eq!(cfg.ng_url, "http://192.168.1.10:8850");
+        std::env::remove_var("ANIMUS_AUTH_TOKEN");
+        std::env::remove_var("NEUROGRAPH_URL");
     }
 }
