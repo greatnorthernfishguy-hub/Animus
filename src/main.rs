@@ -50,6 +50,10 @@
 // What: ContextBuilder::new() now takes ng_url from AnimusConfig
 // Why: ContextBuilder needs the NeuroGraph sidecar URL to call POST /assemble
 // How: cfg.ng_url.clone() passed — reads NEUROGRAPH_URL env (default 127.0.0.1:8850)
+// [2026-05-28] Claude (Sonnet 4.6) — Phase 4: pass ng_url to TurnPipeline
+// What: TurnPipeline::new() now takes ng_url as 5th arg for afterTurn fire-and-forget
+// Why: Phase 4 wiring — pipeline needs NG URL to POST /afterTurn after each turn
+// How: cfg.ng_url already populated from NEUROGRAPH_URL env (default 127.0.0.1:8850)
 // -------------------
 
 use animus::adapters::cli::CliAdapter;
@@ -104,6 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&context_builder),
         Arc::clone(&tract),
         Arc::clone(&agent_runner),
+        cfg.ng_url.clone(),
     ));
 
     let cli = Arc::new(CliAdapter::new(
