@@ -20,6 +20,11 @@
 //      Port 19999 could be in use; MockServer start+drop guarantees a free closed port.
 // How: Deposit turn_ingest immediately after FILTER/tg_pass, before ContextBuilder.build()
 //
+// [2026-05-28] Claude (Sonnet 4.6) — Phase 4 Task 1: minimal AssembleResult bridge
+// What: Update BUILD to call build(&[Value]) and use assembled.messages + .system_prompt
+// Why: context_builder::build() now returns AssembleResult; caller must consume both fields
+// How: Wrap clean_text in single-element slice; use assembled fields in AgentRunSpec
+//
 // 2026-05-25 Claude (Sonnet 4.6) — Phase 1: TurnPipeline state machine
 // What: RECEIVE→FILTER→BUILD→ROUTE→RUN→INGEST→RESPOND→DONE pipeline
 // Why: Replaces rpc.call("ingest"/"assemble"/"afterTurn"); substrate-direct via TractWriter
@@ -95,13 +100,15 @@ impl TurnPipeline {
             "user_id": ctx.user_id,
         }));
 
-        // BUILD — ContextBuilder stub; Phase 3 wires spreading activation assemble()
-        let system_prompt = self.context_builder.build(&clean_text).await;
+        // BUILD — pass current turn to NG; returns KISS-truncated messages + system prompt
+        let assembled = self.context_builder.build(
+            &[serde_json::json!({"role": "user", "content": clean_text})]
+        ).await;
 
-        // ROUTE + RUN — TID owns model selection + provider fallback (hook slot _50_tid_route)
+        // ROUTE + RUN — KISS-truncated messages from assemble flow directly to TID
         let response = self.agent_runner.run(AgentRunSpec {
-            messages: vec![serde_json::json!({"role": "user", "content": clean_text})],
-            system_prompt,
+            messages: assembled.messages,
+            system_prompt: assembled.system_prompt,
         }).await;
 
         // RESPOND
