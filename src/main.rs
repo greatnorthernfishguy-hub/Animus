@@ -46,6 +46,11 @@
 // What: Construct AgentRunner from ToolDispatcher + tid_url; pass to TurnPipeline::new()
 // Why: TurnPipeline now delegates RUN phase to AgentRunner (multi-turn tool loop)
 // How: ToolDispatcher constructed first; AgentRunner wraps it; ANIMUS_AGENT_MAX_ITER controls cap
+// [2026-05-31] Claude (Sonnet 4.6) — #272: tract path migration
+// What: Tract file renamed animus.tract→neurograph.tract; create_dir_all ensures tracts/animus/ exists
+// Why: #272 — NG's _drain_peer_tracts scans tracts/<peer>/neurograph.tract (filesystem-as-registry);
+//      tracts/animus/ auto-registers Animus as peer on first write; old shared_learning path was unread
+// How: create_dir_all on cfg.tract_dir before TractWriter construction; filename changed
 // [2026-05-25] Claude (Sonnet 4.6) — Phase 3: pass ng_url to ContextBuilder
 // What: ContextBuilder::new() now takes ng_url from AnimusConfig
 // Why: ContextBuilder needs the NeuroGraph sidecar URL to call POST /assemble
@@ -85,7 +90,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Animus starting — pipeline mode (substrate-direct)");
 
     let tg = Arc::new(TrollGuardBridge::new(&cfg.trollguard_url));
-    let tract_path = format!("{}/animus.tract", cfg.tract_dir);
+    if let Err(e) = std::fs::create_dir_all(&cfg.tract_dir) {
+        tracing::warn!("tract_dir create failed ({}): {}", cfg.tract_dir, e);
+    }
+    let tract_path = format!("{}/neurograph.tract", cfg.tract_dir);
     let tract = Arc::new(TractWriter::new(&tract_path));
 
     let context_builder = Arc::new(ContextBuilder::new(cfg.ng_url.clone()));

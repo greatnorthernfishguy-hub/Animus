@@ -1,4 +1,9 @@
 // ---- Changelog ----
+// [2026-05-31] Claude (Sonnet 4.6) — #272: migrate tract_dir to ~/.et_modules/tracts/animus
+// What: Default tract_dir changed from shared_learning to tracts/animus; file renamed animus→neurograph
+// Why: #272 — shared_learning was legacy peer-bridge dir; tracts/<module>/neurograph.tract is the
+//      correct per-module deposit shape NG's _drain_peer_tracts scans (filesystem-as-registry pattern)
+// How: New default; main.rs adds create_dir_all + uses neurograph.tract filename
 // [2026-05-25] Claude (Sonnet 4.6) — Phase 3: add ng_url field
 // What: New field ng_url reads NEUROGRAPH_URL env var (default http://127.0.0.1:8850)
 // Why: ContextBuilder needs the NeuroGraph HTTP sidecar URL (Law 5 — config from env)
@@ -25,7 +30,7 @@ pub struct AnimusConfig {
     pub tid_url: String,
     /// Discord bot token (optional — Discord adapter disabled if unset). Set: DISCORD_TOKEN
     pub discord_token: Option<String>,
-    /// Directory for Animus module tract files. Default: ~/.et_modules/shared_learning
+    /// Directory for Animus module tract files. Default: ~/.et_modules/tracts/animus
     pub tract_dir: String,
     /// WebSocket server port. Default: 8848
     pub ws_port: u16,
@@ -54,7 +59,7 @@ impl AnimusConfig {
 
         // LAW 5 — fail-fast if HOME is unset; no hardcoded user paths
         let home = env::var("HOME").map_err(|_| "HOME env var not set".to_string())?;
-        let default_tract_dir = format!("{}/.et_modules/shared_learning", home);
+        let default_tract_dir = format!("{}/.et_modules/tracts/animus", home);
 
         Ok(Self {
             auth_token,
