@@ -1,5 +1,11 @@
 // src/pipeline.rs
 // ---- Changelog ----
+// [2026-05-31] Claude (Sonnet 4.6) — Anima GUI Task 1: PipelineStatus
+// What: Add Stage/StageState/PipelineStatus types; status Arc<Mutex> on TurnPipeline;
+//       stage-transition writes in run(); afterTurn spawn updates last_after_turn
+// Why: HTTP adapter needs GET /status to expose pipeline state to Anima GUI
+// How: Arc<Mutex<PipelineStatus>> shared between run() and future axum State<>
+//
 // [2026-05-28] Claude (Sonnet 4.6) — Phase 4 Task 2: ConversationHistory + afterTurn
 // What: Add ConversationHistory (Mutex<VecDeque>, cap 40); TurnPipeline gains history,
 //       ng_client, ng_url; run() builds history snapshot → NG assemble → KISS messages;
@@ -77,6 +83,45 @@ impl ConversationHistory {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub enum Stage {
+    #[serde(rename = "IDLE")]       Idle,
+    #[serde(rename = "FILTER")]     Filter,
+    #[serde(rename = "INGEST")]     Ingest,
+    #[serde(rename = "BUILD")]      Build,
+    #[serde(rename = "RUN")]        Run,
+    #[serde(rename = "POST-RUN")]   PostRun,
+    #[serde(rename = "AFTER-TURN")] AfterTurn,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageState {
+    Idle,
+    Running,
+    Done,
+    Error,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PipelineStatus {
+    pub stage: Stage,
+    pub stage_state: StageState,
+    pub last_tg_verdict: String,
+    pub last_after_turn: String,
+}
+
+impl Default for PipelineStatus {
+    fn default() -> Self {
+        Self {
+            stage: Stage::Idle,
+            stage_state: StageState::Idle,
+            last_tg_verdict: "unknown".to_string(),
+            last_after_turn: "unknown".to_string(),
+        }
+    }
+}
+
 pub enum SourceType {
     Channel,
     Outbound,
@@ -98,6 +143,7 @@ pub struct TurnPipeline {
     history: ConversationHistory,
     ng_client: reqwest::Client,
     ng_url: String,
+    pub status: Arc<Mutex<PipelineStatus>>,
 }
 
 impl TurnPipeline {
@@ -120,6 +166,7 @@ impl TurnPipeline {
             history: ConversationHistory::new(HISTORY_CAPACITY),
             ng_client,
             ng_url,
+            status: Arc::new(Mutex::new(PipelineStatus::default())),
         }
     }
 
@@ -127,6 +174,7 @@ impl TurnPipeline {
         info!("pipeline FILTER: {:.60}", ctx.text);
 
         // FILTER — TrollGuard perimeter (hook slot _10_trollguard_filter)
+        { let mut s = self.status.lock().unwrap(); s.stage = Stage::Filter; s.stage_state = StageState::Running; }
         let scan = self.trollguard.scan(&ctx.text, "animus").await;
         if scan.tg_unavailable {
             warn!("TrollGuard unavailable — proceeding with original text");
@@ -144,51 +192,79 @@ impl TurnPipeline {
             "verdict": scan.verdict,
             "channel_id": ctx.channel_id,
         }));
+        {
+            let mut s = self.status.lock().unwrap();
+            s.stage_state = StageState::Done;
+            s.last_tg_verdict = pass_event.to_string();
+        }
 
         // INGEST — raw experience pre-BUILD (Law 7: substrate receives input before it is acted upon)
+        { let mut s = self.status.lock().unwrap(); s.stage = Stage::Ingest; s.stage_state = StageState::Running; }
         self.tract.deposit_event_silent("turn_ingest", serde_json::json!({
             "text": clean_text,
             "channel_id": ctx.channel_id,
             "user_id": ctx.user_id,
         }));
+        { let mut s = self.status.lock().unwrap(); s.stage_state = StageState::Done; }
 
         // BUILD — full conversation history → NG assemble (spreading activation + KISS truncation)
+        { let mut s = self.status.lock().unwrap(); s.stage = Stage::Build; s.stage_state = StageState::Running; }
         let messages = self.history.snapshot_with(&clean_text);
         let assembled = self.context_builder.build(&messages).await;
+        { let mut s = self.status.lock().unwrap(); s.stage_state = StageState::Done; }
 
         // ROUTE + RUN — KISS-truncated messages to TID
+        { let mut s = self.status.lock().unwrap(); s.stage = Stage::Run; s.stage_state = StageState::Running; }
         let response = self.agent_runner.run(AgentRunSpec {
             messages: assembled.messages,
             system_prompt: assembled.system_prompt,
         }).await;
+        { let mut s = self.status.lock().unwrap(); s.stage_state = StageState::Done; }
 
         // POST-RUN — deposit exchange to River; update working memory
+        { let mut s = self.status.lock().unwrap(); s.stage = Stage::PostRun; s.stage_state = StageState::Running; }
         self.tract.deposit_event_silent("turn_exchange", serde_json::json!({
             "user": clean_text,
             "assistant": response,
             "channel_id": ctx.channel_id,
         }));
         self.history.push_turn(&clean_text, &response);
+        { let mut s = self.status.lock().unwrap(); s.stage_state = StageState::Done; }
 
         // AFTER-TURN — fire-and-forget NG graph.step() + STDP + _anticipate(); response unblocked
+        { let mut s = self.status.lock().unwrap(); s.stage = Stage::AfterTurn; s.stage_state = StageState::Running; }
         let ng_url = self.ng_url.clone();
         let user_text = clean_text.clone();
         let ng_client = self.ng_client.clone();
+        let status_arc = Arc::clone(&self.status);
         tokio::spawn(async move {
             let body = serde_json::json!({
                 "lastUserMessage": {"role": "user", "content": user_text}
             });
-            if let Err(e) = ng_client
+            match ng_client
                 .post(format!("{}/afterTurn", ng_url))
                 .json(&body)
                 .send()
                 .await
             {
-                tracing::warn!("afterTurn fire failed: {}", e);
+                Err(e) => {
+                    tracing::warn!("afterTurn fire failed: {}", e);
+                    let mut s = status_arc.lock().unwrap();
+                    s.last_after_turn = "failed".to_string();
+                    s.stage = Stage::Idle;
+                    s.stage_state = StageState::Idle;
+                }
+                Ok(_) => {
+                    let mut s = status_arc.lock().unwrap();
+                    s.last_after_turn = "ok".to_string();
+                    s.stage = Stage::Idle;
+                    s.stage_state = StageState::Idle;
+                }
             }
         });
 
-        // RESPOND
+        // RESPOND — reset stage synchronously so status is useful before spawn resolves
+        { let mut s = self.status.lock().unwrap(); s.stage = Stage::Idle; s.stage_state = StageState::Idle; }
         self.tract.deposit_event_silent("turn_complete", serde_json::json!({
             "channel_id": ctx.channel_id,
             "response_len": response.len(),
@@ -354,5 +430,24 @@ mod tests {
         let snap = h.snapshot_with("c");
         // 2 push_turns = 4 stored messages + 1 pending user = 5
         assert_eq!(snap.len(), 5);
+    }
+
+    #[test]
+    fn pipeline_status_initially_idle() {
+        let p = make_pipeline("http://127.0.0.1:1", "http://127.0.0.1:1");
+        let s = p.status.lock().unwrap();
+        assert!(matches!(s.stage, Stage::Idle));
+        assert!(matches!(s.stage_state, StageState::Idle));
+        assert_eq!(s.last_tg_verdict, "unknown");
+        assert_eq!(s.last_after_turn, "unknown");
+    }
+
+    #[test]
+    fn pipeline_status_serializes_stage_names() {
+        let stage = Stage::AfterTurn;
+        let json = serde_json::to_string(&stage).unwrap();
+        assert_eq!(json, "\"AFTER-TURN\"");
+        let stage2 = Stage::PostRun;
+        assert_eq!(serde_json::to_string(&stage2).unwrap(), "\"POST-RUN\"");
     }
 }
