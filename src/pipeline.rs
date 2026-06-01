@@ -170,6 +170,11 @@ impl TurnPipeline {
         }
     }
 
+    /// Returns a snapshot of conversation history for the HTTP adapter's GET /history handler.
+    pub fn history_snapshot(&self) -> Vec<serde_json::Value> {
+        self.history.inner.lock().unwrap().iter().cloned().collect()
+    }
+
     pub async fn run(&self, ctx: TurnContext) -> String {
         info!("pipeline FILTER: {:.60}", ctx.text);
 
@@ -450,5 +455,24 @@ mod tests {
         assert_eq!(json, "\"AFTER-TURN\"");
         let stage2 = Stage::PostRun;
         assert_eq!(serde_json::to_string(&stage2).unwrap(), "\"POST-RUN\"");
+    }
+
+    #[test]
+    fn history_snapshot_initially_empty() {
+        let p = make_pipeline("http://127.0.0.1:1", "http://127.0.0.1:1");
+        assert!(p.history_snapshot().is_empty());
+    }
+
+    #[test]
+    fn history_snapshot_reflects_push_turn() {
+        let h = ConversationHistory::new(40);
+        h.push_turn("hello", "hi there");
+        // Access via inner directly (same module)
+        let snap: Vec<serde_json::Value> = h.inner.lock().unwrap().iter().cloned().collect();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0]["role"], "user");
+        assert_eq!(snap[0]["content"], "hello");
+        assert_eq!(snap[1]["role"], "assistant");
+        assert_eq!(snap[1]["content"], "hi there");
     }
 }
