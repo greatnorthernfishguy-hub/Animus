@@ -180,6 +180,7 @@ impl TurnPipeline {
             warn!("TrollGuard unavailable — proceeding with original text");
         }
         if !scan.is_clean {
+            { let mut s = self.status.lock().unwrap(); s.stage = Stage::Idle; s.stage_state = StageState::Idle; }
             self.tract.deposit_event_silent("tg_block", serde_json::json!({
                 "verdict": scan.verdict,
                 "channel_id": ctx.channel_id,
