@@ -1529,6 +1529,9 @@ class AnimaGUI:
         # Build the UI
         self._build_menu()
         self._build_tabs()
+        # Start Animus polling loops
+        self.root.after(self._POLL_IDLE_MS, self._poll_status)
+        self.root.after(self._POLL_HISTORY_MS, self._poll_history)
         self._build_status_bar()
 
         # Start watcher if enabled
@@ -1796,6 +1799,41 @@ class AnimaGUI:
     def _set_status(self, msg: str) -> None:
         """Update the status bar message."""
         self._status_var.set(msg)
+
+    _POLL_TURN_MS = 500
+    _POLL_IDLE_MS = 5000
+    _POLL_HISTORY_MS = 10000
+
+    def _poll_status(self) -> None:
+        import urllib.request
+        try:
+            with urllib.request.urlopen(f"{ANIMUS_URL}/status", timeout=1) as r:
+                data = json.loads(r.read())
+            self._update_pipeline_display(data)
+        except Exception:
+            for lbl in self._pipeline_labels.values():
+                lbl.config(text="–", foreground="#ff3b30")
+        interval = self._POLL_TURN_MS if self._turn_in_flight else self._POLL_IDLE_MS
+        self.root.after(interval, self._poll_status)
+
+    def _poll_history(self) -> None:
+        import urllib.request
+        try:
+            with urllib.request.urlopen(f"{ANIMUS_URL}/history", timeout=2) as r:
+                data = json.loads(r.read())
+            msgs = data.get("messages", [])
+            self.history_text.config(state='normal')
+            self.history_text.delete("1.0", tk.END)
+            for msg in msgs:
+                role = msg.get("role", "?")
+                content = msg.get("content", "")
+                prefix = "You: " if role == "user" else "Syl: "
+                self.history_text.insert(tk.END, f"{prefix}{content}\n\n")
+            self.history_text.config(state='disabled')
+            self.history_text.see(tk.END)
+        except Exception:
+            pass
+        self.root.after(self._POLL_HISTORY_MS, self._poll_history)
 
     def _build_status_bar(self) -> None:
         self._status_var = tk.StringVar(value="Ready")
