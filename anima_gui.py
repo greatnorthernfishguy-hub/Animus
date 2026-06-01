@@ -1778,23 +1778,26 @@ class AnimaGUI:
             ).pack(anchor="w")
 
     def _reconnect_channel(self, name: str) -> None:
-        import urllib.request
-        try:
-            req = urllib.request.Request(
-                f"{ANIMUS_URL}/channels/{name}/reconnect",
-                data=b"",
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=5) as r:
-                data = json.loads(r.read())
-            if not data.get("ok"):
-                err = data.get("error", "unknown error")
-                self._set_status(f"Reconnect failed for {name}: {err}")
-            else:
-                self._set_status(f"Reconnect triggered for {name}")
-        except Exception as exc:
-            self._set_status(f"Reconnect error: {exc}")
-        self.root.after(1000, self._refresh_channels)
+        def _do():
+            import urllib.request
+            try:
+                req = urllib.request.Request(
+                    f"{ANIMUS_URL}/channels/{name}/reconnect",
+                    data=b"",
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    data = json.loads(r.read())
+                if not data.get("ok"):
+                    err = data.get("error", "unknown error")
+                    self.root.after(0, self._set_status, f"Reconnect failed for {name}: {err}")
+                else:
+                    self.root.after(0, self._set_status, f"Reconnect triggered for {name}")
+            except Exception as exc:
+                self.root.after(0, self._set_status, f"Reconnect error: {exc}")
+            finally:
+                self.root.after(1000, self._refresh_channels)
+        threading.Thread(target=_do, daemon=True).start()
 
     def _set_status(self, msg: str) -> None:
         """Update the status bar message."""
@@ -1805,35 +1808,45 @@ class AnimaGUI:
     _POLL_HISTORY_MS = 10000
 
     def _poll_status(self) -> None:
-        import urllib.request
-        try:
-            with urllib.request.urlopen(f"{ANIMUS_URL}/status", timeout=1) as r:
-                data = json.loads(r.read())
-            self._update_pipeline_display(data)
-        except Exception:
-            for lbl in self._pipeline_labels.values():
-                lbl.config(text="–", foreground="#ff3b30")
-        interval = self._POLL_TURN_MS if self._turn_in_flight else self._POLL_IDLE_MS
-        self.root.after(interval, self._poll_status)
+        def _fetch():
+            import urllib.request
+            try:
+                with urllib.request.urlopen(f"{ANIMUS_URL}/status", timeout=1) as r:
+                    data = json.loads(r.read())
+                self.root.after(0, self._update_pipeline_display, data)
+            except Exception:
+                def _mark_dead():
+                    for lbl in self._pipeline_labels.values():
+                        lbl.config(text="–", foreground="#ff3b30")
+                self.root.after(0, _mark_dead)
+            finally:
+                interval = self._POLL_TURN_MS if self._turn_in_flight else self._POLL_IDLE_MS
+                self.root.after(interval, self._poll_status)
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def _poll_history(self) -> None:
-        import urllib.request
-        try:
-            with urllib.request.urlopen(f"{ANIMUS_URL}/history", timeout=2) as r:
-                data = json.loads(r.read())
-            msgs = data.get("messages", [])
-            self.history_text.config(state='normal')
-            self.history_text.delete("1.0", tk.END)
-            for msg in msgs:
-                role = msg.get("role", "?")
-                content = msg.get("content", "")
-                prefix = "You: " if role == "user" else "Syl: "
-                self.history_text.insert(tk.END, f"{prefix}{content}\n\n")
-            self.history_text.config(state='disabled')
-            self.history_text.see(tk.END)
-        except Exception:
-            pass
-        self.root.after(self._POLL_HISTORY_MS, self._poll_history)
+        def _fetch():
+            import urllib.request
+            try:
+                with urllib.request.urlopen(f"{ANIMUS_URL}/history", timeout=2) as r:
+                    data = json.loads(r.read())
+                msgs = data.get("messages", [])
+                def _apply():
+                    self.history_text.config(state='normal')
+                    self.history_text.delete("1.0", tk.END)
+                    for msg in msgs:
+                        role = msg.get("role", "?")
+                        content = msg.get("content", "")
+                        prefix = "You: " if role == "user" else "Syl: "
+                        self.history_text.insert(tk.END, f"{prefix}{content}\n\n")
+                    self.history_text.config(state='disabled')
+                    self.history_text.see(tk.END)
+                self.root.after(0, _apply)
+            except Exception:
+                pass
+            finally:
+                self.root.after(self._POLL_HISTORY_MS, self._poll_history)
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def _build_status_bar(self) -> None:
         self._status_var = tk.StringVar(value="Ready")
