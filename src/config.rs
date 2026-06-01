@@ -1,4 +1,8 @@
 // ---- Changelog ----
+// [2026-05-31] Claude (Sonnet 4.6) — Anima GUI Task 4: add gui_port
+// What: New field gui_port reads ANIMUS_GUI_PORT env var (default 8848)
+// Why: HttpAdapter needs the port from config (Law 5 — config from env)
+// How: Same parse-with-error pattern as ws_port
 // [2026-05-31] Claude (Sonnet 4.6) — #272: migrate tract_dir to ~/.et_modules/tracts/animus
 // What: Default tract_dir changed from shared_learning to tracts/animus; file renamed animus→neurograph
 // Why: #272 — shared_learning was legacy peer-bridge dir; tracts/<module>/neurograph.tract is the
@@ -34,6 +38,8 @@ pub struct AnimusConfig {
     pub tract_dir: String,
     /// WebSocket server port. Default: 8848
     pub ws_port: u16,
+    /// GUI HTTP server port. Default: 8848. Set: ANIMUS_GUI_PORT
+    pub gui_port: u16,
     /// CES dashboard URL. Default: http://127.0.0.1:8847
     pub ces_url: String,
     /// OpenRouter API key for budget polling. Set: OPENROUTER_API_KEY (optional)
@@ -74,6 +80,12 @@ impl AnimusConfig {
                 port_str
                     .parse::<u16>()
                     .map_err(|_| format!("ANIMUS_WS_PORT='{}' is not a valid u16 port", port_str))?
+            },
+            gui_port: {
+                let port_str = env::var("ANIMUS_GUI_PORT").unwrap_or_else(|_| "8848".to_string());
+                port_str
+                    .parse::<u16>()
+                    .map_err(|_| format!("ANIMUS_GUI_PORT='{}' is not a valid u16 port", port_str))?
             },
             ces_url: env::var("CES_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8847".to_string()),
@@ -168,5 +180,26 @@ mod tests {
         assert_eq!(cfg.ng_url, "http://192.168.1.10:8850");
         std::env::remove_var("ANIMUS_AUTH_TOKEN");
         std::env::remove_var("NEUROGRAPH_URL");
+    }
+
+    #[test]
+    fn config_gui_port_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ANIMUS_AUTH_TOKEN", "tok");
+        std::env::remove_var("ANIMUS_GUI_PORT");
+        let cfg = AnimusConfig::from_env().unwrap();
+        assert_eq!(cfg.gui_port, 8848);
+        std::env::remove_var("ANIMUS_AUTH_TOKEN");
+    }
+
+    #[test]
+    fn config_gui_port_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ANIMUS_AUTH_TOKEN", "tok");
+        std::env::set_var("ANIMUS_GUI_PORT", "9090");
+        let cfg = AnimusConfig::from_env().unwrap();
+        assert_eq!(cfg.gui_port, 9090);
+        std::env::remove_var("ANIMUS_AUTH_TOKEN");
+        std::env::remove_var("ANIMUS_GUI_PORT");
     }
 }

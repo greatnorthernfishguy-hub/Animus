@@ -1,6 +1,10 @@
 // src/main.rs
 // Animus entry point — starts the agentic gateway.
 // ---- Changelog ----
+// [2026-05-31] Claude (Sonnet 4.6) — Anima GUI Task 4: spawn HttpAdapter
+// What: HttpAdapter spawned alongside CLI adapter; serves GET /status /history /channels + POST /turn
+// Why: GUI needs observable HTTP interface; CLI-only had no external status surface
+// How: Arc<TurnPipeline> shared via State<>; port from cfg.gui_port (ANIMUS_GUI_PORT, default 8848)
 // [2026-05-10] Claude (Sonnet 4.6) — Task 1: Initial scaffold
 // What: Placeholder main.rs for initial cargo build verification
 // Why: Project scaffold requires a compiling binary target
@@ -62,6 +66,7 @@
 // -------------------
 
 use animus::adapters::cli::CliAdapter;
+use animus::adapters::http::HttpAdapter;
 use animus::agent_runner::AgentRunner;
 use animus::budget::BudgetMonitor;
 use animus::config::AnimusConfig;
@@ -167,6 +172,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     tokio::spawn(Arc::clone(&outbound).run());
     info!("Outbound Initiator running — tract: {}", outbound_tract);
+
+    let http_adapter = Arc::new(HttpAdapter::new(Arc::clone(&pipeline), cfg.gui_port));
+    tokio::spawn(Arc::clone(&http_adapter).run());
+    info!("Anima GUI HTTP server spawned on port {}", cfg.gui_port);
 
     info!("Animus ready — reading from stdin (CLI mode)");
 
