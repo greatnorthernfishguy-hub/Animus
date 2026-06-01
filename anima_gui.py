@@ -74,6 +74,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 ANIMUS_URL = os.environ.get("ANIMUS_GUI_URL", "http://127.0.0.1:8848")
 
+STAGE_ORDER = ["FILTER", "INGEST", "BUILD", "RUN", "AFTER-TURN"]
+STAGE_MAP = {
+    "FILTER": "FILTER",
+    "INGEST": "INGEST",
+    "BUILD": "BUILD",
+    "RUN": "RUN",
+    "POST-RUN": "RUN",    # POST-RUN shows under RUN display slot
+    "AFTER-TURN": "AFTER-TURN",
+    "IDLE": None,
+}
+
 SUPPORTED_EXTENSIONS = {
     # Code / text
     ".py", ".js", ".ts", ".md", ".txt", ".html", ".htm",
@@ -1443,11 +1454,11 @@ class GUIMessageQueue:
 
 
 # ---------------------------------------------------------------------------
-# 5. NeuroGraphGUI  --  main window
+# 5. AnimaGUI  --  main window
 # ---------------------------------------------------------------------------
 
 
-class NeuroGraphGUI:
+class AnimaGUI:
     """Main application window with four tabs."""
 
     def __init__(self, root: Any) -> None:
@@ -1513,6 +1524,7 @@ class NeuroGraphGUI:
         )
         self.file_watcher: Optional[FileWatcher] = None
         self._ingest_history: List[Dict[str, Any]] = []
+        self._turn_in_flight: bool = False
 
         # Build the UI
         self._build_menu()
@@ -1571,6 +1583,147 @@ class NeuroGraphGUI:
         self._manage_nb.pack(fill=tk.BOTH, expand=True)
         self._build_ingestion_tab(self._manage_nb)
         self._build_channels_tab(self._manage_nb)
+
+    # ---- Syl Tab ----
+
+    def _build_syl_tab(self, parent_frame) -> None:
+        pane = tk.PanedWindow(parent_frame, orient=tk.HORIZONTAL, sashwidth=4,
+                              sashrelief=tk.RAISED)
+        pane.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        # --- Left: Chat ---
+        chat_frame = ttk.Frame(pane, padding=4)
+        pane.add(chat_frame, minsize=300, stretch="always")
+        chat_frame.rowconfigure(0, weight=1)
+        chat_frame.columnconfigure(0, weight=1)
+
+        self.chat_output = scrolledtext.ScrolledText(
+            chat_frame, state='disabled', wrap=tk.WORD,
+            font=("Helvetica", 11), relief=tk.FLAT, padx=8, pady=8,
+        )
+        self.chat_output.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 6))
+        self.chat_output.tag_config("you_tag",
+            foreground="#0071e3", font=("Helvetica", 11, "bold"))
+        self.chat_output.tag_config("you_body",
+            foreground="#1d1d1f", font=("Helvetica", 11))
+        self.chat_output.tag_config("syl_tag",
+            foreground="#34c759", font=("Helvetica", 11, "bold"))
+        self.chat_output.tag_config("syl_body",
+            foreground="#1d1d1f", font=("Helvetica", 11))
+        self.chat_output.tag_config("err_tag",
+            foreground="#ff3b30", font=("Helvetica", 11, "bold"))
+
+        self.chat_input = ttk.Entry(chat_frame, font=("Helvetica", 11))
+        self.chat_input.grid(row=1, column=0, sticky="ew", padx=(0, 4))
+        self.chat_input.bind("<Return>", lambda _: self._on_send())
+
+        self.send_btn = ttk.Button(chat_frame, text="Send", command=self._on_send)
+        self.send_btn.grid(row=1, column=1, sticky="e")
+
+        # --- Right: Pipeline + History ---
+        right_frame = ttk.Frame(pane, padding=4)
+        pane.add(right_frame, minsize=160, stretch="never")
+
+        ttk.Label(right_frame, text="Turn Pipeline",
+                  font=("Helvetica", 10, "bold")).pack(anchor="w", pady=(0, 4))
+
+        pipeline_frame = ttk.Frame(right_frame)
+        pipeline_frame.pack(fill=tk.X)
+        self._pipeline_labels: dict = {}
+        for stage in STAGE_ORDER:
+            row = ttk.Frame(pipeline_frame)
+            row.pack(fill=tk.X, pady=1)
+            ttk.Label(row, text=stage, width=11, anchor="w",
+                      font=("Courier", 9)).pack(side=tk.LEFT)
+            lbl = tk.Label(row, text="○", width=3, foreground="#86868b",
+                           font=("Courier", 10))
+            lbl.pack(side=tk.LEFT)
+            self._pipeline_labels[stage] = lbl
+
+        self._tg_verdict_var = tk.StringVar(value="")
+        ttk.Label(right_frame, textvariable=self._tg_verdict_var,
+                  font=("Courier", 8), foreground="#86868b").pack(anchor="w", pady=(2, 8))
+
+        ttk.Separator(right_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=4)
+
+        ttk.Label(right_frame, text="Conversation History",
+                  font=("Helvetica", 10, "bold")).pack(anchor="w", pady=(0, 4))
+
+        self.history_text = scrolledtext.ScrolledText(
+            right_frame, state='disabled', wrap=tk.WORD,
+            font=("Courier", 8), height=12, relief=tk.FLAT,
+        )
+        self.history_text.pack(fill=tk.BOTH, expand=True)
+
+    def _append_chat(self, sender: str, text: str) -> None:
+        self.chat_output.config(state='normal')
+        if sender == "You":
+            self.chat_output.insert(tk.END, "\nYou:  ", "you_tag")
+            self.chat_output.insert(tk.END, text + "\n", "you_body")
+        elif sender == "Syl":
+            self.chat_output.insert(tk.END, "\nSyl:  ", "syl_tag")
+            self.chat_output.insert(tk.END, text + "\n", "syl_body")
+        else:
+            self.chat_output.insert(tk.END, f"\n[{sender}]  ", "err_tag")
+            self.chat_output.insert(tk.END, text + "\n")
+        self.chat_output.config(state='disabled')
+        self.chat_output.see(tk.END)
+
+    def _update_pipeline_display(self, status: dict) -> None:
+        active = STAGE_MAP.get(status.get("stage", "IDLE"))
+        state = status.get("stage_state", "idle")
+        active_idx = STAGE_ORDER.index(active) if active in STAGE_ORDER else -1
+        for stage, lbl in self._pipeline_labels.items():
+            idx = STAGE_ORDER.index(stage)
+            if active == stage:
+                if state == "running":
+                    symbol, color = "●", "#ff9f0a"
+                elif state == "done":
+                    symbol, color = "✓", "#34c759"
+                else:
+                    symbol, color = "✗", "#ff3b30"
+            elif idx < active_idx:
+                symbol, color = "✓", "#34c759"
+            else:
+                symbol, color = "○", "#86868b"
+            lbl.config(text=symbol, foreground=color)
+
+        verdict = status.get("last_tg_verdict", "")
+        if verdict not in ("unknown", ""):
+            self._tg_verdict_var.set(f"TG: {verdict}")
+        after = status.get("last_after_turn", "")
+        if after not in ("unknown", ""):
+            self._tg_verdict_var.set(
+                self._tg_verdict_var.get() + f"  afterTurn: {after}"
+            )
+
+    def _on_send(self) -> None:
+        text = self.chat_input.get().strip()
+        if not text or self._turn_in_flight:
+            return
+        self.chat_input.delete(0, tk.END)
+        self._turn_in_flight = True
+        self.send_btn.config(state='disabled')
+        self._append_chat("You", text)
+        threading.Thread(target=self._send_turn, args=(text,), daemon=True).start()
+
+    def _send_turn(self, text: str) -> None:
+        import urllib.request
+        try:
+            body = json.dumps({"text": text, "sender": "josh"}).encode()
+            req = urllib.request.Request(
+                f"{ANIMUS_URL}/turn",
+                data=body,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=120) as r:
+                data = json.loads(r.read())
+            self.root.after(0, self._append_chat, "Syl", data.get("response", ""))
+        except Exception as exc:
+            self.root.after(0, self._append_chat, "Error", str(exc))
+        finally:
+            self._turn_in_flight = False
+            self.root.after(0, lambda: self.send_btn.config(state='normal'))
 
     def _build_status_bar(self) -> None:
         self._status_var = tk.StringVar(value="Ready")
@@ -2604,11 +2757,11 @@ def main() -> None:
 
     root = _make_root()
     try:
-        NeuroGraphGUI(root)
+        AnimaGUI(root)
     except Exception as exc:
-        print(f"[neurograph] Fatal startup error: {exc}", file=sys.stderr)
+        print(f"[anima] Fatal startup error: {exc}", file=sys.stderr)
         try:
-            messagebox.showerror("NeuroGraph Startup Error", str(exc))
+            messagebox.showerror("Anima Startup Error", str(exc))
         except Exception:
             pass
         sys.exit(1)
