@@ -1582,9 +1582,10 @@ class NeuroGraphGUI:
 
     # ---- Status Tab ----
 
-    def _build_status_tab(self) -> None:
-        frame = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(frame, text=" Status ")
+    def _build_status_tab(self, notebook=None) -> None:
+        nb = notebook if notebook is not None else self.notebook
+        frame = ttk.Frame(nb, padding=10)
+        nb.add(frame, text=" NG Status ")
 
         title = ttk.Label(frame, text="NeuroGraph Telemetry", font=("", 13, "bold"))
         title.grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 10))
@@ -1679,9 +1680,10 @@ class NeuroGraphGUI:
 
     # ---- Ingestion Tab ----
 
-    def _build_ingestion_tab(self) -> None:
-        frame = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(frame, text=" Ingestion ")
+    def _build_ingestion_tab(self, notebook=None) -> None:
+        nb = notebook if notebook is not None else self.notebook
+        frame = ttk.Frame(nb, padding=10)
+        nb.add(frame, text=" Ingestion ")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(3, weight=1)
         frame.rowconfigure(7, weight=1)
@@ -2243,9 +2245,10 @@ class NeuroGraphGUI:
 
     # ---- Dashboard Tab ----
 
-    def _build_dashboard_tab(self) -> None:
-        frame = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(frame, text=" Dashboard ")
+    def _build_dashboard_tab(self, notebook=None) -> None:
+        nb = notebook if notebook is not None else self.notebook
+        frame = ttk.Frame(nb, padding=10)
+        nb.add(frame, text=" Modules ")
 
         hdr = ttk.Frame(frame)
         hdr.pack(fill=tk.X, pady=(0, 8))
@@ -2382,9 +2385,10 @@ class NeuroGraphGUI:
 
     # ---- Topology Tab ----
 
-    def _build_topology_tab(self) -> None:
-        frame = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(frame, text=" Topology ")
+    def _build_topology_tab(self, notebook=None) -> None:
+        nb = notebook if notebook is not None else self.notebook
+        frame = ttk.Frame(nb, padding=10)
+        nb.add(frame, text=" Topology ")
 
         hdr = ttk.Frame(frame)
         hdr.pack(fill=tk.X, pady=(0, 8))
