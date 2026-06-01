@@ -1725,6 +1725,78 @@ class AnimaGUI:
             self._turn_in_flight = False
             self.root.after(0, lambda: self.send_btn.config(state='normal'))
 
+    # ---- Channels Sub-tab (Manage) ----
+
+    def _build_channels_tab(self, notebook=None) -> None:
+        nb = notebook if notebook is not None else self.notebook
+        frame = ttk.Frame(nb, padding=10)
+        nb.add(frame, text=" Channels ")
+
+        hdr = ttk.Frame(frame)
+        hdr.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(hdr, text="Channels", font=("", 13, "bold")).pack(side=tk.LEFT)
+        ttk.Button(hdr, text="Refresh", command=self._refresh_channels).pack(
+            side=tk.RIGHT, padx=(0, 4)
+        )
+
+        self._channels_list_frame = ttk.Frame(frame)
+        self._channels_list_frame.pack(fill=tk.BOTH, expand=True)
+
+        self._refresh_channels()
+
+    def _refresh_channels(self) -> None:
+        import urllib.request
+        for w in self._channels_list_frame.winfo_children():
+            w.destroy()
+        try:
+            with urllib.request.urlopen(f"{ANIMUS_URL}/channels", timeout=2) as r:
+                data = json.loads(r.read())
+            for ch in data.get("channels", []):
+                row = ttk.Frame(self._channels_list_frame)
+                row.pack(fill=tk.X, pady=3)
+                dot_color = "#34c759" if ch["status"] == "connected" else "#ff3b30"
+                tk.Label(row, text="●", foreground=dot_color,
+                         font=("Helvetica", 12)).pack(side=tk.LEFT, padx=(0, 6))
+                ttk.Label(row, text=ch["name"], width=20, anchor="w").pack(side=tk.LEFT)
+                ttk.Label(row, text=ch["status"], width=14, anchor="w").pack(side=tk.LEFT)
+                if ch["status"] != "connected":
+                    ttk.Button(
+                        row, text="Reconnect",
+                        command=lambda n=ch["name"]: self._reconnect_channel(n),
+                    ).pack(side=tk.LEFT, padx=(8, 0))
+                if ch.get("error"):
+                    ttk.Label(row, text=ch["error"], foreground="#ff3b30",
+                              font=("Helvetica", 9)).pack(side=tk.LEFT, padx=(8, 0))
+        except Exception as exc:
+            ttk.Label(
+                self._channels_list_frame,
+                text=f"Error fetching channels: {exc}",
+                foreground="#ff3b30",
+            ).pack(anchor="w")
+
+    def _reconnect_channel(self, name: str) -> None:
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                f"{ANIMUS_URL}/channels/{name}/reconnect",
+                data=b"",
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as r:
+                data = json.loads(r.read())
+            if not data.get("ok"):
+                err = data.get("error", "unknown error")
+                self._set_status(f"Reconnect failed for {name}: {err}")
+            else:
+                self._set_status(f"Reconnect triggered for {name}")
+        except Exception as exc:
+            self._set_status(f"Reconnect error: {exc}")
+        self.root.after(1000, self._refresh_channels)
+
+    def _set_status(self, msg: str) -> None:
+        """Update the status bar message."""
+        self._status_var.set(msg)
+
     def _build_status_bar(self) -> None:
         self._status_var = tk.StringVar(value="Ready")
         bar = ttk.Label(
