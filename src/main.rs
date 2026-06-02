@@ -59,6 +59,10 @@
 // What: ContextBuilder::new() now takes ng_url from AnimusConfig
 // Why: ContextBuilder needs the NeuroGraph sidecar URL to call POST /assemble
 // How: cfg.ng_url.clone() passed — reads NEUROGRAPH_URL env (default 127.0.0.1:8850)
+// [2026-06-01] Claude (Sonnet 4.6) — Rename display name Animus→Anima
+// What: 3 info! log lines + systemd service Description updated to "Anima"
+// Why: The entity is named Anima; Animus is the repo name retained for history
+// How: Strings only — binary/env-var/repo names unchanged
 // [2026-05-28] Claude (Sonnet 4.6) — Phase 4: pass ng_url to TurnPipeline
 // What: TurnPipeline::new() now takes ng_url as 5th arg for afterTurn fire-and-forget
 // Why: Phase 4 wiring — pipeline needs NG URL to POST /afterTurn after each turn
@@ -92,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cfg = AnimusConfig::from_env().map_err(|e| format!("Config error: {}", e))?;
 
-    info!("Animus starting — pipeline mode (substrate-direct)");
+    info!("Anima starting — pipeline mode (substrate-direct)");
 
     let tg = Arc::new(TrollGuardBridge::new(&cfg.trollguard_url));
     if let Err(e) = std::fs::create_dir_all(&cfg.tract_dir) {
@@ -177,7 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(Arc::clone(&http_adapter).run());
     info!("Anima GUI HTTP server spawned on port {}", cfg.gui_port);
 
-    info!("Animus ready — reading from stdin (CLI mode)");
+    info!("Anima ready — reading from stdin (CLI mode)");
 
     // CLI turn loop — interactive adapter; exits on stdin EOF.
     // In service mode systemd wires stdin to /dev/null, so this exits immediately
@@ -202,6 +206,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Park until SIGTERM/SIGINT — keeps the outbound initiator alive in service mode.
     tokio::signal::ctrl_c().await?;
-    info!("Animus shutting down");
+    info!("Anima shutting down");
     Ok(())
 }
