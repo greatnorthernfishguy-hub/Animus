@@ -17,6 +17,14 @@ Environment:
 """
 
 # ---- Changelog ----
+# [2026-06-02] Claude (Sonnet 4.6) — GUI bug fixes (4 issues)
+# What: (1) Pipeline labels use ASCII text not Unicode circles (rendered as "0" on VPS font)
+#       (2) Immediate fast poll kicked off in _on_send (was waiting up to 5s idle timer)
+#       (3) NG Status tab replaced ingestion_mgr with HTTP GET /status + /modules on sidecar
+#       (4) Topology default path fixed: data/main.msgpack → data/checkpoints/main.msgpack
+# Why: (1) ○ glyph rendered as "0" in Courier on VPS; (2) slow turns missed by idle poller;
+#      (3) ingestion_mgr assumes local NG Python object — Anima's NG is a remote service;
+#      (4) NG stores checkpoints in data/checkpoints/, not data/ root
 # [2026-05-31] Claude (Sonnet 4.6) — Anima GUI v1
 # What: Copied from neurograph_gui.py and extended as Anima ecosystem command center
 # Why: Anima spec requires 3-tab GUI (Syl/Organism/Manage) with Anima HTTP backend
@@ -1027,7 +1035,7 @@ class TopologyLoader:
     via callback through GUIMessageQueue.
     """
 
-    _DEFAULT_CHECKPOINT = Path.home() / "NeuroGraph" / "data" / "main.msgpack"
+    _DEFAULT_CHECKPOINT = Path.home() / "NeuroGraph" / "data" / "checkpoints" / "main.msgpack"
 
     def __init__(
         self,
@@ -1638,7 +1646,7 @@ class AnimaGUI:
             row.pack(fill=tk.X, pady=1)
             ttk.Label(row, text=stage, width=11, anchor="w",
                       font=("Courier", 9)).pack(side=tk.LEFT)
-            lbl = tk.Label(row, text="○", width=3, foreground="#86868b",
+            lbl = tk.Label(row, text=" - ", width=4, foreground="#86868b",
                            font=("Courier", 10))
             lbl.pack(side=tk.LEFT)
             self._pipeline_labels[stage] = lbl
@@ -1680,15 +1688,15 @@ class AnimaGUI:
             idx = STAGE_ORDER.index(stage)
             if active == stage:
                 if state == "running":
-                    symbol, color = "●", "#ff9f0a"
+                    symbol, color = ">>", "#ff9f0a"
                 elif state == "done":
-                    symbol, color = "✓", "#34c759"
+                    symbol, color = "OK", "#34c759"
                 else:
-                    symbol, color = "✗", "#ff3b30"
+                    symbol, color = "!!", "#ff3b30"
             elif idx < active_idx:
-                symbol, color = "✓", "#34c759"
+                symbol, color = "OK", "#34c759"
             else:
-                symbol, color = "○", "#86868b"
+                symbol, color = " - ", "#86868b"
             lbl.config(text=symbol, foreground=color)
 
         verdict = status.get("last_tg_verdict", "")
@@ -1709,6 +1717,8 @@ class AnimaGUI:
         self.send_btn.config(state='disabled')
         self._append_chat("You", text)
         threading.Thread(target=self._send_turn, args=(text,), daemon=True).start()
+        # Kick off fast polling immediately — don't wait for the idle 5s timer
+        self.root.after(150, self._poll_status)
 
     def _send_turn(self, text: str) -> None:
         import urllib.request
@@ -1907,20 +1917,33 @@ class AnimaGUI:
         self.root.after(interval, self._refresh_status)
 
     def _refresh_status_now(self) -> None:
-        """Kick off an async stats fetch.  Results arrive via msg_queue."""
-        if not self.ingestion_mgr.is_initialized:
-            # Show "initializing" state instead of blocking
-            for var in self._stat_labels.values():
-                var.set("loading...")
-            self._status_var.set("Initializing NeuroGraph (loading model)...")
+        """Kick off an async stats fetch from NG sidecar HTTP endpoints."""
+        def _fetch():
+            import urllib.request
+            ng = os.environ.get("NEUROGRAPH_URL", "http://127.0.0.1:8850")
+            try:
+                with urllib.request.urlopen(f"{ng}/status", timeout=3) as r:
+                    status = json.loads(r.read())
+                with urllib.request.urlopen(f"{ng}/modules", timeout=5) as r:
+                    modules = json.loads(r.read())
+                combined = {"_ng_status": status, "_modules": modules}
+                self.root.after(0, self._apply_stats, combined)
+            except Exception as exc:
+                self.root.after(0, self._apply_stats_error, str(exc))
+        threading.Thread(target=_fetch, daemon=True).start()
 
-        self.ingestion_mgr.get_stats_async(
-            on_result=lambda stats: self.msg_queue.put(self._apply_stats, stats),
-            on_error=lambda err: self.msg_queue.put(self._apply_stats_error, err),
-        )
+    def _apply_stats(self, combined: Dict[str, Any]) -> None:
+        """Render NG sidecar /status + /modules into the status tab (main thread)."""
+        ng_status = combined.get("_ng_status", {})
+        modules = combined.get("_modules", {})
 
-    def _apply_stats(self, stats: Dict[str, Any]) -> None:
-        """Apply fetched stats to the status tab labels (runs on main thread)."""
+        # Pull substrate stats from any module that exposes them
+        stats: Dict[str, Any] = {}
+        for _mid, mdata in modules.items():
+            if isinstance(mdata, dict) and "nodes" in mdata:
+                stats = mdata
+                break
+
         for key, var in self._stat_labels.items():
             if key == "pruned_sprouted":
                 var.set(f"{stats.get('pruned', 0)} / {stats.get('sprouted', 0)}")
@@ -1931,10 +1954,14 @@ class AnimaGUI:
                     dim = emb.get("dimension", "?")
                     var.set(f"{backend} ({dim}d)")
                 else:
-                    var.set(str(emb))
+                    var.set(str(emb) if emb else "--")
+            elif key == "messages":
+                # last afterTurn fire time from sidecar /status
+                var.set(str(ng_status.get("last_afterturn", "--")))
             else:
-                var.set(str(stats.get(key, "--")))
-        self._status_var.set("Ready")
+                val = stats.get(key)
+                var.set(str(val) if val is not None else "--")
+        self._status_var.set(f"NG alive — {len(modules)} module(s) registered")
 
     def _apply_stats_error(self, error: str) -> None:
         """Handle stats fetch failure (runs on main thread)."""
