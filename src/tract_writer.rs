@@ -1,7 +1,7 @@
 // ---- Changelog ----
 // 2026-05-10 Task8/tract_writer — BTF River writes
 // What: Writes Binary Tract Format frames to .tract files for NeuroGraph River consumption
-// Why: Animus must deposit its own module events (channel_connection, tg_outcome, etc.) to the River
+// Why: Anima must deposit its own module events (channel_connection, tg_outcome, etc.) to the River
 // How: 24-byte BTF envelope (MAGIC + VERSION + type + length + timestamp + CRC32) + msgpack payload
 // -------------------
 
@@ -48,10 +48,10 @@ impl TractWriter {
 
     /// Deposit a named event as a BTF outcome entry.
     /// event_type and payload are serialized as MessagePack.
-    /// Uses zero-embedding (no vector) — Animus events are structural, not semantic.
+    /// Uses zero-embedding (no vector) — Anima events are structural, not semantic.
     pub fn deposit_event(&self, event_type: &str, payload: Value) -> Result<(), String> {
         let metadata = serde_json::json!({
-            "module_id": "animus",
+            "module_id": "anima",
             "event_type": event_type,
             "payload": payload,
         });

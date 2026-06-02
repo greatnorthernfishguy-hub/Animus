@@ -5,7 +5,7 @@
 // ---- Changelog ----
 // [2026-05-31] Claude (Sonnet 4.6) — Anima GUI v1: HTTP adapter
 // What: Axum HTTP server backing anima_gui.py's polling and /turn calls
-// Why: GUI needs a local HTTP interface to Animus; CLI-only mode had no observable API
+// Why: GUI needs a local HTTP interface to Anima; CLI-only mode had no observable API
 // How: 5 axum handlers share Arc<TurnPipeline> via State extractor
 // -------------------
 
@@ -111,7 +111,7 @@ async fn handle_status(State(pipeline): State<Arc<TurnPipeline>>) -> Json<serde_
         "stage_state": status.stage_state,
         "last_tg_verdict": status.last_tg_verdict,
         "last_after_turn": status.last_after_turn,
-        "animus_alive": true,
+        "anima_alive": true,
     }))
 }
 
@@ -206,7 +206,7 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["stage"], "IDLE");
-        assert_eq!(json["animus_alive"], true);
+        assert_eq!(json["anima_alive"], true);
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@
 // ---- Changelog ----
 // 2026-05-10 Task10/cli-adapter — CliAdapter
 // What: stdin/stdout turn pipeline: TrollGuard → ingest → assemble → TID → afterTurn
-// Why: First channel adapter for Animus — enables local interactive use + integration tests
+// Why: First channel adapter for Anima — enables local interactive use + integration tests
 // How: process_line() builds ChannelContext + TurnEnvelope, runs run_pipeline() through
 //      all 5 stages, deposits River events at each stage boundary
 // 2026-05-25 Claude (Sonnet 4.6) — Phase 1: drop RpcAdapter + IntrospectionRelay, delegate to TurnPipeline

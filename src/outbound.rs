@@ -369,7 +369,7 @@ impl OutboundInitiator {
             loop {
                 // Budget gate — exit cleanly if credits are critical
                 if read_budget_flag(&self.budget_path) {
-                    let stop_text = "[Animus] Budget critical — wrapping up autonomous work";
+                    let stop_text = "[Anima] Budget critical — wrapping up autonomous work";
                     write_outbound_log(&self.tract_path, &text, &channel, stop_text);
                     warn!("Reaction loop: budget critical — halting");
                     break;

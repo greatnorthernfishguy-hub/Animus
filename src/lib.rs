@@ -1,5 +1,5 @@
 // src/lib.rs
-// Animus library root — re-exports public modules for integration tests.
+// Anima library root — re-exports public modules for integration tests.
 //
 // ---- Changelog ----
 // [2026-05-10] Claude (Sonnet 4.6) — Task 1: Initial scaffold

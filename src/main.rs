@@ -14,7 +14,7 @@
 // Why: Core types needed for channel adapter ↔ RPC pipeline handoff
 // How: Removed duplicate pub mod envelope; lib.rs is canonical
 // [2026-05-10] Claude (Sonnet 4.6) — Task 11: CLI pipeline wiring
-// What: Wires AnimusConfig → TrollGuard → RpcAdapter → TractWriter →
+// What: Wires AnimaConfig → TrollGuard → RpcAdapter → TractWriter →
 //       IntrospectionRelay → CliAdapter into a stdin/stdout turn loop
 // Why: Provides a working end-to-end CLI pipeline for testing before WebSocket server
 // How: All components constructed from env config, passed as Arc to CliAdapter
@@ -56,13 +56,17 @@
 //      tracts/animus/ auto-registers Animus as peer on first write; old shared_learning path was unread
 // How: create_dir_all on cfg.tract_dir before TractWriter construction; filename changed
 // [2026-05-25] Claude (Sonnet 4.6) — Phase 3: pass ng_url to ContextBuilder
-// What: ContextBuilder::new() now takes ng_url from AnimusConfig
+// What: ContextBuilder::new() now takes ng_url from AnimaConfig
 // Why: ContextBuilder needs the NeuroGraph sidecar URL to call POST /assemble
 // How: cfg.ng_url.clone() passed — reads NEUROGRAPH_URL env (default 127.0.0.1:8850)
-// [2026-06-01] Claude (Sonnet 4.6) — Rename display name Animus→Anima
-// What: 3 info! log lines + systemd service Description updated to "Anima"
-// Why: The entity is named Anima; Animus is the repo name retained for history
-// How: Strings only — binary/env-var/repo names unchanged
+// [2026-06-01] Claude (Sonnet 4.6) — Full Animus→Anima rename
+// What: AnimusConfig→AnimaConfig; module_id "animus"→"anima"; all display strings,
+//       comments, JSON keys (animus_alive→anima_alive), README updated to Anima.
+//       Filesystem paths (tracts/animus/), env vars (ANIMUS_*), crate name, binary
+//       name, and systemd service unit name unchanged (infrastructure identifiers).
+// Why: The entity is Anima; Animus is the GitHub repo name kept for history only.
+//      Consistent naming connects search, wikilinks, and docs across the ecosystem.
+// How: replace_all edits across src/*.rs, anima_gui.py, README.md
 // [2026-05-28] Claude (Sonnet 4.6) — Phase 4: pass ng_url to TurnPipeline
 // What: TurnPipeline::new() now takes ng_url as 5th arg for afterTurn fire-and-forget
 // Why: Phase 4 wiring — pipeline needs NG URL to POST /afterTurn after each turn
@@ -73,7 +77,7 @@ use animus::adapters::cli::CliAdapter;
 use animus::adapters::http::HttpAdapter;
 use animus::agent_runner::AgentRunner;
 use animus::budget::BudgetMonitor;
-use animus::config::AnimusConfig;
+use animus::config::AnimaConfig;
 use animus::context_builder::ContextBuilder;
 use animus::outbound::OutboundInitiator;
 use animus::pipeline::TurnPipeline;
@@ -94,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_target(false)
         .init();
 
-    let cfg = AnimusConfig::from_env().map_err(|e| format!("Config error: {}", e))?;
+    let cfg = AnimaConfig::from_env().map_err(|e| format!("Config error: {}", e))?;
 
     info!("Anima starting — pipeline mode (substrate-direct)");
 
@@ -133,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&tract),
     ));
 
-    // Animus is a peer module — it does not own or bootstrap the NeuroGraph topology.
+    // Anima is a peer module — it does not own or bootstrap the NeuroGraph topology.
     // Syl's neurograph_rpc.py (owned by OpenClaw) manages the topology lifecycle.
 
     // Outbound Initiator — always running; gives Syl autonomous origination.

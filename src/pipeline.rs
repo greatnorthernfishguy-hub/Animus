@@ -180,7 +180,7 @@ impl TurnPipeline {
 
         // FILTER — TrollGuard perimeter (hook slot _10_trollguard_filter)
         { let mut s = self.status.lock().unwrap(); s.stage = Stage::Filter; s.stage_state = StageState::Running; }
-        let scan = self.trollguard.scan(&ctx.text, "animus").await;
+        let scan = self.trollguard.scan(&ctx.text, "anima").await;
         if scan.tg_unavailable {
             warn!("TrollGuard unavailable — proceeding with original text");
         }

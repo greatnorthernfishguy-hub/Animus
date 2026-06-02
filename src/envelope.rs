@@ -1,5 +1,5 @@
 // src/envelope.rs
-// Turn envelope and channel context types for the Animus gateway
+// Turn envelope and channel context types for the Anima gateway
 // Part of the native agentic gateway for E-T Systems / NeuroGraph Ecosystem
 //
 // ---- Changelog ----

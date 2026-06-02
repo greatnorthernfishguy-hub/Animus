@@ -13,10 +13,10 @@
 // Why: ContextBuilder needs the NeuroGraph HTTP sidecar URL (Law 5 — config from env)
 // How: Optional env var with hardcoded default matching NG's sidecar listen port
 // [2026-05-25] Claude (Sonnet 4.6) — Phase 1: remove bridge_path + neurograph_rpc_path
-// What: Removed bridge_path and neurograph_rpc_path from AnimusConfig
+// What: Removed bridge_path and neurograph_rpc_path from AnimaConfig
 // Why: bridge.py subprocess eliminated in Phase 1 — these fields have no consumers
 // How: Fields + from_env() assignments removed; env var ANIMUS_BRIDGE_PATH no longer read
-// 2026-05-10 Task3/config — AnimusConfig reads all credentials from environment
+// 2026-05-10 Task3/config — AnimaConfig reads all credentials from environment
 // What: Env-var-backed config struct with typed fields and defaults
 // Why: Law 5 — all config from .bashrc/environment, no hardcoded values
 // How: std::env::var() with sensible defaults; only ANIMUS_AUTH_TOKEN is required
@@ -25,7 +25,7 @@
 use std::env;
 
 #[derive(Debug, Clone)]
-pub struct AnimusConfig {
+pub struct AnimaConfig {
     /// Auth token for WebSocket connections. Set: ANIMUS_AUTH_TOKEN
     pub auth_token: String,
     /// TrollGuard HTTP base URL. Default: http://127.0.0.1:7438
@@ -58,7 +58,7 @@ pub struct AnimusConfig {
     pub ng_url: String,
 }
 
-impl AnimusConfig {
+impl AnimaConfig {
     pub fn from_env() -> Result<Self, String> {
         let auth_token = env::var("ANIMUS_AUTH_TOKEN")
             .map_err(|_| "ANIMUS_AUTH_TOKEN not set in environment".to_string())?;
@@ -124,7 +124,7 @@ mod tests {
     fn config_reads_required_vars() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ANIMUS_AUTH_TOKEN", "test_token_123");
-        let config = AnimusConfig::from_env().unwrap();
+        let config = AnimaConfig::from_env().unwrap();
         assert_eq!(config.auth_token, "test_token_123");
         assert_eq!(config.trollguard_url, "http://127.0.0.1:7438");
         assert_eq!(config.ws_port, 8848);
@@ -135,7 +135,7 @@ mod tests {
     fn config_missing_auth_token_is_error() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("ANIMUS_AUTH_TOKEN");
-        let result = AnimusConfig::from_env();
+        let result = AnimaConfig::from_env();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("ANIMUS_AUTH_TOKEN"));
     }
@@ -150,7 +150,7 @@ mod tests {
         std::env::remove_var("ANIMUS_BUDGET_POLL_SECS");
         std::env::remove_var("ANIMUS_SEARCH_URL");
         std::env::remove_var("ANIMUS_ALLOWED_PATHS");
-        let cfg = AnimusConfig::from_env().unwrap();
+        let cfg = AnimaConfig::from_env().unwrap();
         assert!(cfg.openrouter_api_key.is_none());
         assert!((cfg.budget_low_usd - 10.0).abs() < 0.01);
         assert!((cfg.budget_critical_usd - 2.0).abs() < 0.01);
@@ -166,7 +166,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ANIMUS_AUTH_TOKEN", "tok");
         std::env::remove_var("NEUROGRAPH_URL");
-        let cfg = AnimusConfig::from_env().unwrap();
+        let cfg = AnimaConfig::from_env().unwrap();
         assert_eq!(cfg.ng_url, "http://127.0.0.1:8850");
         std::env::remove_var("ANIMUS_AUTH_TOKEN");
     }
@@ -176,7 +176,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ANIMUS_AUTH_TOKEN", "tok");
         std::env::set_var("NEUROGRAPH_URL", "http://192.168.1.10:8850");
-        let cfg = AnimusConfig::from_env().unwrap();
+        let cfg = AnimaConfig::from_env().unwrap();
         assert_eq!(cfg.ng_url, "http://192.168.1.10:8850");
         std::env::remove_var("ANIMUS_AUTH_TOKEN");
         std::env::remove_var("NEUROGRAPH_URL");
@@ -187,7 +187,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ANIMUS_AUTH_TOKEN", "tok");
         std::env::remove_var("ANIMUS_GUI_PORT");
-        let cfg = AnimusConfig::from_env().unwrap();
+        let cfg = AnimaConfig::from_env().unwrap();
         assert_eq!(cfg.gui_port, 8848);
         std::env::remove_var("ANIMUS_AUTH_TOKEN");
     }
@@ -197,7 +197,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ANIMUS_AUTH_TOKEN", "tok");
         std::env::set_var("ANIMUS_GUI_PORT", "9090");
-        let cfg = AnimusConfig::from_env().unwrap();
+        let cfg = AnimaConfig::from_env().unwrap();
         assert_eq!(cfg.gui_port, 9090);
         std::env::remove_var("ANIMUS_AUTH_TOKEN");
         std::env::remove_var("ANIMUS_GUI_PORT");

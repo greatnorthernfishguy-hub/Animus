@@ -11,7 +11,7 @@ Launch:
     python3 anima_gui.py
 
 Environment:
-    ANIMUS_GUI_URL       Animus HTTP base URL (default: http://127.0.0.1:8848)
+    ANIMUS_GUI_URL       Anima HTTP base URL (default: http://127.0.0.1:8848)
     NEUROGRAPH_URL       NeuroGraph HTTP sidecar URL (default: http://127.0.0.1:8850)
     NEUROGRAPH_GUI_DIR   GUI data dir (default: ~/.neurograph)
 """
@@ -19,7 +19,7 @@ Environment:
 # ---- Changelog ----
 # [2026-05-31] Claude (Sonnet 4.6) — Anima GUI v1
 # What: Copied from neurograph_gui.py and extended as Anima ecosystem command center
-# Why: Anima spec requires 3-tab GUI (Syl/Organism/Manage) with Animus HTTP backend
+# Why: Anima spec requires 3-tab GUI (Syl/Organism/Manage) with Anima HTTP backend
 # How: Approach A (copy + extend) — existing NG tabs reused as sub-tabs in Organism/Manage
 # -------------------
 
@@ -1529,7 +1529,7 @@ class AnimaGUI:
         # Build the UI
         self._build_menu()
         self._build_tabs()
-        # Start Animus polling loops
+        # Start Anima polling loops
         self.root.after(self._POLL_IDLE_MS, self._poll_status)
         self.root.after(self._POLL_HISTORY_MS, self._poll_history)
         self._build_status_bar()
