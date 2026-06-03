@@ -1,5 +1,13 @@
 // src/pipeline.rs
 // ---- Changelog ----
+// [2026-06-03] Claude (Sonnet 4.6) — Guard empty Ok("") from history and River
+// What: AgentResponse::Ok("") (TID null finish_reason + empty content) now skips
+//       River deposit and push_turn. Non-empty content only enters history/River.
+// Why: TID returns null finish_reason + empty content on transient provider errors.
+//      #263's Ok/InfraError split doesn't cover this — an empty string passes the
+//      !starts_with("[TID") check but recording "" into history poisons later turns.
+// How: if text.is_empty() guard in Ok arm; warn logged; empty still returned to caller.
+//
 // [2026-06-03] Claude (Sonnet 4.6) — #263: gate POST-RUN on AgentResponse::Ok
 // What: Import AgentResponse; match on agent_runner.run() result; River deposit +
 //       push_turn only fire on Ok variant; InfraError logs warning and skips both.
@@ -240,12 +248,16 @@ impl TurnPipeline {
         { let mut s = self.status.lock().unwrap(); s.stage = Stage::PostRun; s.stage_state = StageState::Running; }
         let response = match agent_response {
             AgentResponse::Ok(text) => {
-                self.tract.deposit_event_silent("turn_exchange", serde_json::json!({
-                    "user": clean_text,
-                    "assistant": text,
-                    "channel_id": ctx.channel_id,
-                }));
-                self.history.push_turn(&clean_text, &text);
+                if text.is_empty() {
+                    warn!("TID returned empty content — skipping River deposit and history");
+                } else {
+                    self.tract.deposit_event_silent("turn_exchange", serde_json::json!({
+                        "user": clean_text,
+                        "assistant": text,
+                        "channel_id": ctx.channel_id,
+                    }));
+                    self.history.push_turn(&clean_text, &text);
+                }
                 text
             }
             AgentResponse::InfraError(msg) => {
@@ -479,6 +491,43 @@ mod tests {
     fn history_snapshot_initially_empty() {
         let p = make_pipeline("http://127.0.0.1:1", "http://127.0.0.1:1");
         assert!(p.history_snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_tid_response_does_not_poison_history() {
+        let tg_server = MockServer::start();
+        tg_server.mock(|when, then| {
+            when.method(POST).path("/scan/text");
+            then.status(200).json_body(serde_json::json!({
+                "verdict": "SAFE", "sanitized_text": "hello"
+            }));
+        });
+        let tid_server = MockServer::start();
+        // TID returns null finish_reason + empty content (transient provider error)
+        tid_server.mock(|when, then| {
+            when.method(POST).path("/v1/chat/completions");
+            then.status(200).json_body(serde_json::json!({
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": null},
+                    "finish_reason": null
+                }],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 0, "total_tokens": 5}
+            }));
+        });
+        let pipeline = make_pipeline(&tg_server.base_url(), &tid_server.base_url());
+        let ctx = TurnContext {
+            text: "hello".to_string(),
+            channel_id: "cli".to_string(),
+            user_id: "test".to_string(),
+            source: SourceType::Channel,
+        };
+        let result = pipeline.run(ctx).await;
+        // Empty string returned to caller but NOT pushed to history
+        assert_eq!(result, "");
+        assert!(pipeline.history_snapshot().is_empty(), "empty response must not enter history");
     }
 
     #[test]
