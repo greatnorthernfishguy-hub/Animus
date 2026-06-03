@@ -17,17 +17,20 @@ Environment:
 """
 
 # ---- Changelog ----
-# [2026-06-02] Claude (Sonnet 4.6) — GUI bug fixes (5 issues)
+# [2026-06-02] Claude (Sonnet 4.6) — GUI bug fixes (6 issues)
 # What: (1) Pipeline labels use ASCII text not Unicode circles (rendered as "0" on VPS font)
 #       (2) Immediate fast poll kicked off in _on_send (was waiting up to 5s idle timer)
 #       (3) NG Status tab replaced ingestion_mgr with HTTP GET /stats + /status on sidecar
 #       (4) Topology default path fixed: data/main.msgpack → data/checkpoints/main.msgpack
 #       (5) _apply_stats reads from combined["_stats"] not module-scraping loop; fixes embedding
 #           field to use model_name/device_active instead of missing "backend" key
+#       (6) TopologyLoader._read: embedding from metadata.poincare_dir; synapse src/tgt from
+#           pre_node_id/post_node_id — loader was using wrong keys, producing blank 3D graph
 # Why: (1) ○ glyph rendered as "0" in Courier on VPS; (2) slow turns missed by idle poller;
 #      (3) ingestion_mgr assumes local NG Python object — Anima's NG is a remote service;
 #      (4) NG stores checkpoints in data/checkpoints/, not data/ root;
-#      (5) _apply_stats was still reading _modules (not in combined) so stats was always {}
+#      (5) _apply_stats was still reading _modules (not in combined) so stats was always {};
+#      (6) NG node schema: embedding in metadata.poincare_dir, synapse IDs in pre/post_node_id
 # [2026-05-31] Claude (Sonnet 4.6) — Anima GUI v1
 # What: Copied from neurograph_gui.py and extended as Anima ecosystem command center
 # Why: Anima spec requires 3-tab GUI (Syl/Organism/Manage) with Anima HTTP backend
@@ -1071,15 +1074,19 @@ class TopologyLoader:
         node_voltages: List[float] = []
         for nid in node_ids:
             nd = nodes[nid] if isinstance(nodes, dict) else {}
-            emb = nd.get("embedding") or nd.get("vector") or []
+            meta = nd.get("metadata") or {}
+            emb = (nd.get("embedding") or nd.get("vector")
+                   or meta.get("poincare_dir") or [])
             node_embeddings.append(emb if emb else [0.0] * 768)
             node_voltages.append(float(nd.get("voltage", 0.0)))
         synapse_pairs: List[Any] = []
         synapse_weights: List[float] = []
         if isinstance(edges, dict):
             for _, edge in edges.items():
-                src = edge.get("src") or edge.get("source") or ""
-                tgt = edge.get("tgt") or edge.get("target") or ""
+                src = (edge.get("pre_node_id") or edge.get("src")
+                       or edge.get("source") or "")
+                tgt = (edge.get("post_node_id") or edge.get("tgt")
+                       or edge.get("target") or "")
                 w = float(edge.get("weight", 0.0))
                 if src and tgt:
                     synapse_pairs.append((src, tgt))
