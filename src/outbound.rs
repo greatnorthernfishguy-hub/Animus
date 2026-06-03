@@ -4,6 +4,13 @@
 // Injects outbound turns into the same pipeline as inbound turns (TrollGuard first).
 //
 // ---- Changelog ----
+// [2026-06-03] Claude (Sonnet 4.6) — Remove [TOOL] dispatch from reaction loop
+// What: OutboundInitiator no longer holds tool_dispatcher; [TOOL] marker processing
+//       removed from drain_and_inject. [WANT] and [OUTBOUND] unchanged.
+// Why:  CliAdapter::process_line() routes through TurnPipeline → AgentRunner, which
+//       handles tool_calls natively with its own dedup+cap. The [TOOL] reaction loop
+//       was a redundant parallel dispatch that bypassed AgentRunner entirely.
+// How:  tool_dispatcher field removed; loop exit simplified to new_outbound.is_empty().
 // [2026-05-20] Claude (Sonnet 4.6) — Task A5: reaction loop in drain_and_inject
 // What: OutboundInitiator gains tool_dispatcher, budget_path, wants_path fields.
 //       drain_and_inject now runs a nested reaction loop per BTF frame.
@@ -169,37 +176,6 @@ fn write_outbound_log(tract_path: &str, sent: &str, channel: &str, response: &st
     }
 }
 
-/// Extract [TOOL name=X]query[/TOOL] markers → Vec<(tool_name, query)>.
-pub(crate) fn extract_tool_markers(text: &str) -> Vec<(String, String)> {
-    let mut results = Vec::new();
-    let mut search = text;
-    while let Some(start) = search.find("[TOOL ") {
-        let rest = &search[start..];
-        let tag_end = match rest.find(']') {
-            Some(i) => i,
-            None => break,
-        };
-        // Attribute substring after "[TOOL " and before "]"
-        let attrs = &rest[6..tag_end];
-        let name = attrs
-            .strip_prefix("name=")
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let after_tag = &rest[tag_end + 1..];
-        if let Some(close) = after_tag.find("[/TOOL]") {
-            let inner = after_tag[..close].trim().to_string();
-            if !name.is_empty() {
-                results.push((name, inner));
-            }
-            search = &after_tag[close + 7..];
-        } else {
-            break;
-        }
-    }
-    results
-}
-
 /// Extract [WANT]text[/WANT] markers → Vec<inner_text>.
 pub(crate) fn extract_want_markers(text: &str) -> Vec<String> {
     let mut results = Vec::new();
@@ -289,7 +265,6 @@ pub struct OutboundInitiator {
     tract_path: String,
     adapter: Arc<CliAdapter>,
     pulse_interval_secs: u64,
-    tool_dispatcher: Arc<crate::tool_dispatcher::ToolDispatcher>,
     budget_path: String,
     wants_path: String,
 }
@@ -299,7 +274,6 @@ impl OutboundInitiator {
         tract_path: &str,
         adapter: Arc<CliAdapter>,
         pulse_interval_secs: u64,
-        tool_dispatcher: Arc<crate::tool_dispatcher::ToolDispatcher>,
         budget_path: &str,
         wants_path: &str,
     ) -> Self {
@@ -307,7 +281,6 @@ impl OutboundInitiator {
             tract_path: tract_path.to_string(),
             adapter,
             pulse_interval_secs,
-            tool_dispatcher,
             budget_path: budget_path.to_string(),
             wants_path: wants_path.to_string(),
         }
@@ -375,7 +348,6 @@ impl OutboundInitiator {
                     break;
                 }
 
-                let new_tools = extract_tool_markers(&current_response);
                 let new_wants = extract_want_markers(&current_response);
                 let new_outbound = extract_outbound_markers(&current_response);
 
@@ -385,8 +357,8 @@ impl OutboundInitiator {
                     info!("Reaction loop: syl_explicit want recorded: {:.80}", want);
                 }
 
-                // Clean exit — no new actions to process
-                if new_tools.is_empty() && new_outbound.is_empty() {
+                // Clean exit — no chained outbound to process
+                if new_outbound.is_empty() {
                     break;
                 }
 
@@ -398,15 +370,6 @@ impl OutboundInitiator {
                         loop_start.elapsed().as_secs_f32()
                     );
                     break;
-                }
-
-                // Process tools first — results become next input
-                for (tool_name, query) in &new_tools {
-                    let result = self.tool_dispatcher.invoke(tool_name, query).await;
-                    info!("Reaction loop: tool={} result_len={}", tool_name, result.len());
-                    write_outbound_log(&self.tract_path, query, tool_name, &result);
-                    current_response =
-                        self.adapter.process_line(&result, "syl_outbound").await;
                 }
 
                 // Process chained outbound intents
@@ -514,23 +477,6 @@ mod tests {
 
     // --- Marker parsers ---
     #[test]
-    fn extract_tool_markers_basic() {
-        let text = "Hello [TOOL name=web_search]rust async[/TOOL] world";
-        let tools = extract_tool_markers(text);
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].0, "web_search");
-        assert_eq!(tools[0].1, "rust async");
-    }
-
-    #[test]
-    fn extract_tool_markers_multiple() {
-        let text = "[TOOL name=web_search]query1[/TOOL] mid [TOOL name=read_file]/tmp/x[/TOOL]";
-        let tools = extract_tool_markers(text);
-        assert_eq!(tools.len(), 2);
-        assert_eq!(tools[1].0, "read_file");
-    }
-
-    #[test]
     fn extract_want_markers_basic() {
         let text = "I [WANT]learn more about STDP[/WANT] today";
         let wants = extract_want_markers(text);
@@ -558,7 +504,6 @@ mod tests {
     #[test]
     fn extract_markers_empty_on_no_match() {
         let text = "plain text with no markers";
-        assert!(extract_tool_markers(text).is_empty());
         assert!(extract_want_markers(text).is_empty());
         assert!(extract_outbound_markers(text).is_empty());
     }
@@ -584,25 +529,23 @@ mod tests {
 
     #[test]
     fn extract_chained_markers_simulate_loop_exit() {
-        // A response with only [WANT] — no [TOOL] or [OUTBOUND] — loop exits immediately
+        // A response with only [WANT] — no [OUTBOUND] — loop exits immediately
         let response = "Thinking about [WANT]substrate dynamics[/WANT] today.";
-        let tools = extract_tool_markers(response);
         let wants = extract_want_markers(response);
         let outbound = extract_outbound_markers(response);
-        assert!(tools.is_empty());
         assert_eq!(wants.len(), 1);
         assert!(outbound.is_empty());
-        // Loop condition: no new actions → break
-        assert!(tools.is_empty() && outbound.is_empty());
+        // Loop condition: no chained outbound → break
+        assert!(outbound.is_empty());
     }
 
     #[test]
-    fn extract_chained_markers_has_tool_continues_loop() {
-        let response = "[TOOL name=web_search]spiking neural networks[/TOOL]";
-        let tools = extract_tool_markers(response);
-        assert_eq!(tools.len(), 1);
-        // Loop condition: tools non-empty → continue
-        assert!(!tools.is_empty());
+    fn extract_chained_markers_has_outbound_continues_loop() {
+        let response = "[OUTBOUND channel=discord]Hello world[/OUTBOUND]";
+        let outbound = extract_outbound_markers(response);
+        assert_eq!(outbound.len(), 1);
+        // Loop condition: outbound non-empty → continue
+        assert!(!outbound.is_empty());
     }
 
     // --- Budget flag reader ---

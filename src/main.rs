@@ -67,6 +67,10 @@
 // Why: The entity is Anima; Animus is the GitHub repo name kept for history only.
 //      Consistent naming connects search, wikilinks, and docs across the ecosystem.
 // How: replace_all edits across src/*.rs, anima_gui.py, README.md
+// [2026-06-03] Claude (Sonnet 4.6) — Remove tool_dispatcher from OutboundInitiator
+// What: OutboundInitiator::new() 5 args (was 6) — tool_dispatcher removed
+// Why:  [TOOL] reaction loop removed; AgentRunner handles tool_calls natively
+// How:  Drop Arc::clone(&tool_dispatcher) from OutboundInitiator::new() call
 // [2026-05-28] Claude (Sonnet 4.6) — Phase 4: pass ng_url to TurnPipeline
 // What: TurnPipeline::new() now takes ng_url as 5th arg for afterTurn fire-and-forget
 // Why: Phase 4 wiring — pipeline needs NG URL to POST /afterTurn after each turn
@@ -174,7 +178,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &outbound_tract,
         Arc::clone(&cli),
         30,
-        Arc::clone(&tool_dispatcher),
         &budget_path,
         &wants_path,
     ));
