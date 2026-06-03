@@ -17,7 +17,7 @@ Environment:
 """
 
 # ---- Changelog ----
-# [2026-06-02] Claude (Sonnet 4.6) — GUI bug fixes (6 issues)
+# [2026-06-02] Claude (Sonnet 4.6) — GUI bug fixes (7 issues)
 # What: (1) Pipeline labels use ASCII text not Unicode circles (rendered as "0" on VPS font)
 #       (2) Immediate fast poll kicked off in _on_send (was waiting up to 5s idle timer)
 #       (3) NG Status tab replaced ingestion_mgr with HTTP GET /stats + /status on sidecar
@@ -26,11 +26,14 @@ Environment:
 #           field to use model_name/device_active instead of missing "backend" key
 #       (6) TopologyLoader._read: embedding from metadata.poincare_dir; synapse src/tgt from
 #           pre_node_id/post_node_id — loader was using wrong keys, producing blank 3D graph
+#       (7) Bunyan panel: replaced dead JSONL file scan with GET /modules HTTP fetch;
+#           panel formatter shows uptime/message_count/peers when no events present
 # Why: (1) ○ glyph rendered as "0" in Courier on VPS; (2) slow turns missed by idle poller;
 #      (3) ingestion_mgr assumes local NG Python object — Anima's NG is a remote service;
 #      (4) NG stores checkpoints in data/checkpoints/, not data/ root;
 #      (5) _apply_stats was still reading _modules (not in combined) so stats was always {};
-#      (6) NG node schema: embedding in metadata.poincare_dir, synapse IDs in pre/post_node_id
+#      (6) NG node schema: embedding in metadata.poincare_dir, synapse IDs in pre/post_node_id;
+#      (7) bunyan*.jsonl never created — Bunyan reports via /modules not shared_learning files
 # [2026-05-31] Claude (Sonnet 4.6) — Anima GUI v1
 # What: Copied from neurograph_gui.py and extended as Anima ecosystem command center
 # Why: Anima spec requires 3-tab GUI (Syl/Organism/Manage) with Anima HTTP backend
@@ -976,28 +979,19 @@ class EcosystemPoller:
             return {"offline": True, "reason": str(exc)}
 
     def _fetch_bunyan(self) -> Dict[str, Any]:
-        import glob as _glob
-        pattern = str(Path.home() / ".et_modules" / "shared_learning" / "bunyan*.jsonl")
-        files = sorted(_glob.glob(pattern))
-        if not files:
-            return {"offline": True, "reason": "no bunyan files"}
-        lines: List[str] = []
-        for fpath in reversed(files):
-            try:
-                with open(fpath, "r", encoding="utf-8") as fh:
-                    chunk = [ln.strip() for ln in fh.readlines() if ln.strip()]
-                    lines = chunk + lines
-                    if len(lines) >= 5:
-                        break
-            except OSError:
-                continue
-        events: List[Any] = []
-        for ln in lines[-5:]:
-            try:
-                events.append(json.loads(ln))
-            except json.JSONDecodeError:
-                events.append({"raw": ln})
-        return {"events": events}
+        ng = os.environ.get("NEUROGRAPH_URL", "http://127.0.0.1:8850")
+        modules_data = self._fetch_http(f"{ng}/modules")
+        if modules_data.get("offline"):
+            return modules_data
+        bunyan = modules_data.get("bunyan")
+        if not bunyan:
+            return {"offline": True, "reason": "bunyan not registered with NG"}
+        return {
+            "events": [],
+            "uptime_seconds": bunyan.get("uptime_seconds", 0),
+            "message_count": bunyan.get("message_count", 0),
+            "peers_on_river": len(bunyan.get("module", {}).get("peers_on_river", [])),
+        }
 
     def _fetch_json(self, path: Path) -> Dict[str, Any]:
         try:
@@ -2647,7 +2641,13 @@ class AnimaGUI:
                     lines.append(str(msg)[:120])
                 else:
                     lines.append(str(ev)[:120])
-            return "\n".join(lines) if lines else "No events"
+            if not lines:
+                uptime = data.get("uptime_seconds", 0)
+                msgs = data.get("message_count", 0)
+                peers = data.get("peers_on_river", 0)
+                lines.append(f"alive — uptime {int(uptime)}s")
+                lines.append(f"messages: {msgs}  peers on river: {peers}")
+            return "\n".join(lines)
         if panel == "elmer":
             lines = []
             for k in ("health_score", "maintenance_target", "last_action",
