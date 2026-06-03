@@ -2,6 +2,15 @@
 // AgentRunner — multi-turn tool loop for Anima's RUN phase.
 //
 // ---- Changelog ----
+// [2026-06-03] Claude (Sonnet 4.6) — #263: typed AgentResponse
+// What: run() now returns AgentResponse::Ok(String) | AgentResponse::InfraError(String)
+//       instead of bare String. Callers gate River deposit + push_turn on Ok variant.
+// Why: Punchlist #263 — infra error strings (TID down, parse fail, iteration cap) were
+//      recorded into ConversationHistory as if they were real Syl turns, polluting her
+//      working memory and the substrate River deposit with garbage data.
+// How: AgentResponse enum added. Four return sites classified: malformed/parse/unavailable/
+//      cap → InfraError; real LLM content → Ok. Tests updated to match on variant.
+//
 // 2026-05-25 Claude (Sonnet 4.6) — Phase 2: AgentRunner
 // What: Multi-turn tool loop: call TID → parse tool_calls → execute → repeat until stop/cap
 // Why: Spec §2 RUN phase. Current call_tid() calls wrong endpoint (/chat → 404 in prod).
@@ -14,6 +23,24 @@ use crate::tool_dispatcher::ToolDispatcher;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::warn;
+
+/// Typed result from AgentRunner::run(). Callers gate River deposit + history on the Ok variant.
+#[derive(Debug)]
+pub enum AgentResponse {
+    /// Real LLM content — safe to record into ConversationHistory and deposit to the River.
+    Ok(String),
+    /// Infra failure (TID down, parse error, iteration cap) — do NOT record into history or River.
+    InfraError(String),
+}
+
+impl AgentResponse {
+    /// The response text regardless of variant — always returned to the user.
+    pub fn into_text(self) -> String {
+        match self {
+            AgentResponse::Ok(s) | AgentResponse::InfraError(s) => s,
+        }
+    }
+}
 
 /// Pure data object for one agent run (Nanobot pattern — makes AgentRunner testable/reusable).
 pub struct AgentRunSpec {
@@ -43,7 +70,7 @@ impl AgentRunner {
         Self { tool_dispatcher, client, tid_url, max_iter }
     }
 
-    pub async fn run(&self, spec: AgentRunSpec) -> String {
+    pub async fn run(&self, spec: AgentRunSpec) -> AgentResponse {
         let mut messages: Vec<serde_json::Value> = Vec::new();
         if !spec.system_prompt.is_empty() {
             messages.push(serde_json::json!({
@@ -61,7 +88,7 @@ impl AgentRunner {
 
             let choice = match response["choices"].as_array().and_then(|c| c.first()) {
                 Some(c) => c,
-                None => return "[TID: malformed response]".to_string(),
+                None => return AgentResponse::InfraError("[TID: malformed response]".to_string()),
             };
 
             let finish_reason = choice["finish_reason"].as_str().unwrap_or_else(|| {
@@ -72,12 +99,21 @@ impl AgentRunner {
             messages.push(message.clone());
 
             if finish_reason != "tool_calls" {
-                return message["content"].as_str().unwrap_or("").to_string();
+                let content = message["content"].as_str().unwrap_or("").to_string();
+                // Infra error sentinels fabricated by call_tid_oai on TID failure
+                return if content.starts_with("[TID") {
+                    AgentResponse::InfraError(content)
+                } else {
+                    AgentResponse::Ok(content)
+                };
             }
 
             let tool_calls = match message["tool_calls"].as_array() {
                 Some(tc) if !tc.is_empty() => tc.clone(),
-                _ => return message["content"].as_str().unwrap_or("").to_string(),
+                _ => {
+                    let content = message["content"].as_str().unwrap_or("").to_string();
+                    return AgentResponse::Ok(content);
+                }
             };
 
             for tc in &tool_calls {
@@ -112,7 +148,7 @@ impl AgentRunner {
             }
         }
 
-        "[AgentRunner: iteration cap reached]".to_string()
+        AgentResponse::InfraError("[AgentRunner: iteration cap reached]".to_string())
     }
 
     async fn call_tid_oai(
@@ -213,7 +249,7 @@ mod tests {
             messages: vec![serde_json::json!({"role": "user", "content": "hi"})],
             system_prompt: String::new(),
         }).await;
-        assert_eq!(result, "Hello from Syl!");
+        assert!(matches!(result, AgentResponse::Ok(ref s) if s == "Hello from Syl!"));
     }
 
     #[tokio::test]
@@ -231,7 +267,7 @@ mod tests {
             messages: vec![serde_json::json!({"role": "user", "content": "help"})],
             system_prompt: "Be concise".to_string(),
         }).await;
-        assert_eq!(result, "Sure");
+        assert!(matches!(result, AgentResponse::Ok(ref s) if s == "Sure"));
     }
 
     #[tokio::test]
@@ -257,7 +293,7 @@ mod tests {
             messages: vec![serde_json::json!({"role": "user", "content": "read the file"})],
             system_prompt: String::new(),
         }).await;
-        assert_eq!(result, "Got the file result");
+        assert!(matches!(result, AgentResponse::Ok(ref s) if s == "Got the file result"));
     }
 
     #[tokio::test]
@@ -292,7 +328,7 @@ mod tests {
             messages: vec![serde_json::json!({"role": "user", "content": "read twice"})],
             system_prompt: String::new(),
         }).await;
-        assert_eq!(result, "Done");
+        assert!(matches!(result, AgentResponse::Ok(ref s) if s == "Done"));
     }
 
     #[tokio::test]
@@ -310,7 +346,7 @@ mod tests {
             messages: vec![serde_json::json!({"role": "user", "content": "loop"})],
             system_prompt: String::new(),
         }).await;
-        assert_eq!(result, "[AgentRunner: iteration cap reached]");
+        assert!(matches!(result, AgentResponse::InfraError(ref s) if s == "[AgentRunner: iteration cap reached]"));
     }
 
     #[tokio::test]
@@ -321,6 +357,6 @@ mod tests {
             messages: vec![serde_json::json!({"role": "user", "content": "hi"})],
             system_prompt: String::new(),
         }).await;
-        assert_eq!(result, "[TID unavailable]");
+        assert!(matches!(result, AgentResponse::InfraError(ref s) if s == "[TID unavailable]"));
     }
 }

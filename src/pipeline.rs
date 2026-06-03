@@ -1,5 +1,12 @@
 // src/pipeline.rs
 // ---- Changelog ----
+// [2026-06-03] Claude (Sonnet 4.6) — #263: gate POST-RUN on AgentResponse::Ok
+// What: Import AgentResponse; match on agent_runner.run() result; River deposit +
+//       push_turn only fire on Ok variant; InfraError logs warning and skips both.
+// Why: Punchlist #263 — infra error strings polluted ConversationHistory and River.
+// How: Replace bare String binding with AgentResponse match; into_text() extracts
+//      the display string for the RESPOND path regardless of variant.
+//
 // [2026-05-31] Claude (Sonnet 4.6) — Anima GUI Task 1: PipelineStatus
 // What: Add Stage/StageState/PipelineStatus types; status Arc<Mutex> on TurnPipeline;
 //       stage-transition writes in run(); afterTurn spawn updates last_after_turn
@@ -46,7 +53,7 @@
 //      (_50_), TractWriter BTF deposit at INGEST — no subprocess bridge
 // -------------------
 
-use crate::agent_runner::{AgentRunSpec, AgentRunner};
+use crate::agent_runner::{AgentResponse, AgentRunSpec, AgentRunner};
 use crate::context_builder::ContextBuilder;
 use crate::tract_writer::TractWriter;
 use crate::trollguard::TrollGuardBridge;
@@ -221,20 +228,31 @@ impl TurnPipeline {
 
         // ROUTE + RUN — KISS-truncated messages to TID
         { let mut s = self.status.lock().unwrap(); s.stage = Stage::Run; s.stage_state = StageState::Running; }
-        let response = self.agent_runner.run(AgentRunSpec {
+        let agent_response = self.agent_runner.run(AgentRunSpec {
             messages: assembled.messages,
             system_prompt: assembled.system_prompt,
         }).await;
         { let mut s = self.status.lock().unwrap(); s.stage_state = StageState::Done; }
 
-        // POST-RUN — deposit exchange to River; update working memory
+        // POST-RUN — deposit exchange to River; update working memory.
+        // Gated on AgentResponse::Ok — infra errors are not Syl turns and must not
+        // enter ConversationHistory or the River substrate.
         { let mut s = self.status.lock().unwrap(); s.stage = Stage::PostRun; s.stage_state = StageState::Running; }
-        self.tract.deposit_event_silent("turn_exchange", serde_json::json!({
-            "user": clean_text,
-            "assistant": response,
-            "channel_id": ctx.channel_id,
-        }));
-        self.history.push_turn(&clean_text, &response);
+        let response = match agent_response {
+            AgentResponse::Ok(text) => {
+                self.tract.deposit_event_silent("turn_exchange", serde_json::json!({
+                    "user": clean_text,
+                    "assistant": text,
+                    "channel_id": ctx.channel_id,
+                }));
+                self.history.push_turn(&clean_text, &text);
+                text
+            }
+            AgentResponse::InfraError(msg) => {
+                warn!("agent_runner infra error — skipping River deposit and history: {}", msg);
+                msg
+            }
+        };
         { let mut s = self.status.lock().unwrap(); s.stage_state = StageState::Done; }
 
         // AFTER-TURN — fire-and-forget NG graph.step() + STDP + _anticipate(); response unblocked
