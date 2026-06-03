@@ -1922,11 +1922,11 @@ class AnimaGUI:
             import urllib.request
             ng = os.environ.get("NEUROGRAPH_URL", "http://127.0.0.1:8850")
             try:
+                with urllib.request.urlopen(f"{ng}/stats", timeout=5) as r:
+                    stats = json.loads(r.read())
                 with urllib.request.urlopen(f"{ng}/status", timeout=3) as r:
                     status = json.loads(r.read())
-                with urllib.request.urlopen(f"{ng}/modules", timeout=5) as r:
-                    modules = json.loads(r.read())
-                combined = {"_ng_status": status, "_modules": modules}
+                combined = {"_ng_status": status, "_stats": stats}
                 self.root.after(0, self._apply_stats, combined)
             except Exception as exc:
                 self.root.after(0, self._apply_stats_error, str(exc))
