@@ -17,14 +17,17 @@ Environment:
 """
 
 # ---- Changelog ----
-# [2026-06-02] Claude (Sonnet 4.6) — GUI bug fixes (4 issues)
+# [2026-06-02] Claude (Sonnet 4.6) — GUI bug fixes (5 issues)
 # What: (1) Pipeline labels use ASCII text not Unicode circles (rendered as "0" on VPS font)
 #       (2) Immediate fast poll kicked off in _on_send (was waiting up to 5s idle timer)
-#       (3) NG Status tab replaced ingestion_mgr with HTTP GET /status + /modules on sidecar
+#       (3) NG Status tab replaced ingestion_mgr with HTTP GET /stats + /status on sidecar
 #       (4) Topology default path fixed: data/main.msgpack → data/checkpoints/main.msgpack
+#       (5) _apply_stats reads from combined["_stats"] not module-scraping loop; fixes embedding
+#           field to use model_name/device_active instead of missing "backend" key
 # Why: (1) ○ glyph rendered as "0" in Courier on VPS; (2) slow turns missed by idle poller;
 #      (3) ingestion_mgr assumes local NG Python object — Anima's NG is a remote service;
-#      (4) NG stores checkpoints in data/checkpoints/, not data/ root
+#      (4) NG stores checkpoints in data/checkpoints/, not data/ root;
+#      (5) _apply_stats was still reading _modules (not in combined) so stats was always {}
 # [2026-05-31] Claude (Sonnet 4.6) — Anima GUI v1
 # What: Copied from neurograph_gui.py and extended as Anima ecosystem command center
 # Why: Anima spec requires 3-tab GUI (Syl/Organism/Manage) with Anima HTTP backend
@@ -1933,16 +1936,9 @@ class AnimaGUI:
         threading.Thread(target=_fetch, daemon=True).start()
 
     def _apply_stats(self, combined: Dict[str, Any]) -> None:
-        """Render NG sidecar /status + /modules into the status tab (main thread)."""
+        """Render NG sidecar /status + /stats into the status tab (main thread)."""
         ng_status = combined.get("_ng_status", {})
-        modules = combined.get("_modules", {})
-
-        # Pull substrate stats from any module that exposes them
-        stats: Dict[str, Any] = {}
-        for _mid, mdata in modules.items():
-            if isinstance(mdata, dict) and "nodes" in mdata:
-                stats = mdata
-                break
+        stats = combined.get("_stats", {})
 
         for key, var in self._stat_labels.items():
             if key == "pruned_sprouted":
@@ -1950,18 +1946,19 @@ class AnimaGUI:
             elif key == "embedding_backend":
                 emb = stats.get("embedding", {})
                 if isinstance(emb, dict):
-                    backend = emb.get("backend", "unknown")
+                    name = emb.get("model_name", emb.get("backend", "unknown"))
                     dim = emb.get("dimension", "?")
-                    var.set(f"{backend} ({dim}d)")
+                    device = emb.get("device_active", "")
+                    var.set(f"{name} ({dim}d, {device})" if device else f"{name} ({dim}d)")
                 else:
                     var.set(str(emb) if emb else "--")
-            elif key == "messages":
-                # last afterTurn fire time from sidecar /status
+            elif key == "message_count":
                 var.set(str(ng_status.get("last_afterturn", "--")))
             else:
                 val = stats.get(key)
                 var.set(str(val) if val is not None else "--")
-        self._status_var.set(f"NG alive — {len(modules)} module(s) registered")
+        node_count = stats.get("nodes", "?")
+        self._status_var.set(f"NG alive — {node_count} nodes")
 
     def _apply_stats_error(self, error: str) -> None:
         """Handle stats fetch failure (runs on main thread)."""
