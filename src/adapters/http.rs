@@ -180,6 +180,7 @@ mod tests {
             tract,
             runner,
             "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:1".to_string(), // TID unreachable in tests — preference call fails silently
         ))
     }
 

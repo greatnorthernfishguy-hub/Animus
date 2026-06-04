@@ -134,6 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&tract),
         Arc::clone(&agent_runner),
         cfg.ng_url.clone(),
+        cfg.tid_url.clone(),
     ));
 
     let cli = Arc::new(CliAdapter::new(

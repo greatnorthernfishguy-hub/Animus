@@ -1,5 +1,14 @@
 // src/pipeline.rs
 // ---- Changelog ----
+// [2026-06-03] Claude (Sonnet 4.6) — Human routing preference detection
+// What: detect_routing_preference() scans user text for OSS preference phrases;
+//       fire-and-forget POST to TID /routing/preference after INGEST when detected;
+//       tid_url field added to TurnPipeline (from AnimaConfig.tid_url via main.rs).
+// Why:  Josh can say "use more open source models" and have it register as a TID
+//       routing signal. Anima is the natural UX home for this — it sees every turn.
+// How:  Keyword match on lowercase text; tokio::spawn fire-and-forget same as afterTurn;
+//       TID amplifies open_source_bias for OSS_PREF_DURATION_TURNS routing decisions.
+//
 // [2026-06-03] Claude (Sonnet 4.6) — Guard empty Ok("") from history and River
 // What: AgentResponse::Ok("") (TID null finish_reason + empty content) now skips
 //       River deposit and push_turn. Non-empty content only enters history/River.
@@ -70,6 +79,32 @@ use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 const HISTORY_CAPACITY: usize = 40;
+
+// Defaults for the OSS routing preference signal sent to TID.
+// OSS_PREF_BOOST replaces (not compounds) TID's config.open_source_bias (default 0.02).
+// 0.12 is enough to reliably favor OSS models over closed equals without overriding
+// genuine quality differences — closed models still win when scoring better overall.
+const OSS_PREF_BOOST: f64 = 0.12;
+const OSS_PREF_DURATION_TURNS: u32 = 20;
+
+/// Returns true when the user turn expresses a routing preference toward open-source models.
+/// Uses conservative, unambiguous substring matching — prefers false negatives over false
+/// positives (a missed preference is harmless; a spurious one would confuse the user).
+fn detect_routing_preference(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let patterns = [
+        "more open source", "more open-source", "more opensource",
+        "use open source", "use open-source",
+        "prefer open source", "prefer open-source",
+        "open source model", "open-source model",
+        "more oss", "use oss", "prefer oss",
+        "open weights", "open-weights",
+        "open weight model", "open-weight model",
+        "try open source", "switch to open source",
+        "more free model", "more open model",
+    ];
+    patterns.iter().any(|p| lower.contains(p))
+}
 
 struct ConversationHistory {
     inner: Mutex<VecDeque<serde_json::Value>>,
@@ -158,6 +193,7 @@ pub struct TurnPipeline {
     history: ConversationHistory,
     ng_client: reqwest::Client,
     ng_url: String,
+    tid_url: String,
     pub status: Arc<Mutex<PipelineStatus>>,
 }
 
@@ -168,6 +204,7 @@ impl TurnPipeline {
         tract: Arc<TractWriter>,
         agent_runner: Arc<AgentRunner>,
         ng_url: String,
+        tid_url: String,
     ) -> Self {
         let ng_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
@@ -181,6 +218,7 @@ impl TurnPipeline {
             history: ConversationHistory::new(HISTORY_CAPACITY),
             ng_client,
             ng_url,
+            tid_url,
             status: Arc::new(Mutex::new(PipelineStatus::default())),
         }
     }
@@ -227,6 +265,29 @@ impl TurnPipeline {
             "user_id": ctx.user_id,
         }));
         { let mut s = self.status.lock().unwrap(); s.stage_state = StageState::Done; }
+
+        // PREFERENCE SIGNAL — detect natural language routing preferences and notify TID
+        // fire-and-forget, same as afterTurn; never blocks the pipeline
+        if detect_routing_preference(&clean_text) {
+            let tid_url = self.tid_url.clone();
+            let pref_client = self.ng_client.clone();
+            tokio::spawn(async move {
+                let body = serde_json::json!({
+                    "oss_boost": OSS_PREF_BOOST,
+                    "duration_turns": OSS_PREF_DURATION_TURNS,
+                    "note": "User requested more open-source model usage",
+                });
+                match pref_client
+                    .post(format!("{}/routing/preference", tid_url))
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(_) => info!("Routing preference signal sent to TID"),
+                    Err(e) => warn!("Failed to send routing preference to TID: {}", e),
+                }
+            });
+        }
 
         // BUILD — full conversation history → NG assemble (spreading activation + KISS truncation)
         { let mut s = self.status.lock().unwrap(); s.stage = Stage::Build; s.stage_state = StageState::Running; }
@@ -328,7 +389,7 @@ mod tests {
         let dispatcher = Arc::new(ToolDispatcher::from_env());
         let runner = Arc::new(AgentRunner::new(dispatcher, tid_url.to_string(), 8));
         // Port 1 for ng_url — afterTurn fires and fails silently (fire-and-forget by design)
-        TurnPipeline::new(tg, cb, tract, runner, "http://127.0.0.1:1".to_string())
+        TurnPipeline::new(tg, cb, tract, runner, "http://127.0.0.1:1".to_string(), tid_url.to_string())
     }
 
     #[tokio::test]
