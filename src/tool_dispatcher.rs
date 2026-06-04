@@ -3,6 +3,15 @@
 // Initial tools: web_search (SearXNG), read_file (path-gated).
 //
 // ---- Changelog ----
+// [2026-06-04] Claude (Sonnet 4.6) — #284: read_file cap 4000→100k, offset/limit params
+// What: ReadFileTool default limit raised from 4000 to 100,000 chars. Optional 'offset'
+//       (char position) and 'limit' params added. invoke_args() added to ToolHandler trait
+//       (default delegates to invoke); ReadFileTool overrides it. execute_args() now calls
+//       handler.invoke_args() directly instead of extracting a flat query string.
+// Why:  4000-char cap blocked Syl from reading MASTER docs and architectural files. Offset
+//       + limit allow navigation of files too large for one call. Punchlist #284.
+// How:  invoke_args() extracts path/offset/limit from JSON args; invoke() delegates to it.
+//       Continuation footer tells Syl exact offset to use for next section.
 // [2026-05-25] Claude (Sonnet 4.6) — Phase 2: capability introspection + JSON-args dispatch
 // What: Add name/description/parameters_schema to ToolHandler trait; tool_definitions() +
 //       execute_args() on ToolDispatcher
@@ -28,6 +37,23 @@ pub trait ToolHandler: Send + Sync {
     fn description(&self) -> &str;
     fn parameters_schema(&self) -> serde_json::Value;
     async fn invoke(&self, query: &str) -> String;
+    /// Dispatch with full JSON args. Default extracts primary string arg and calls invoke().
+    /// Override to consume additional parameters (e.g. offset, limit).
+    async fn invoke_args(&self, args: &serde_json::Value) -> String {
+        let query = if let Some(q) = args.get("query").and_then(|v| v.as_str()) {
+            q.to_string()
+        } else if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+            p.to_string()
+        } else if let Some(obj) = args.as_object() {
+            obj.values()
+                .find_map(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| args.to_string())
+        } else {
+            args.to_string()
+        };
+        self.invoke(&query).await
+    }
 }
 
 pub struct ToolDispatcher {
@@ -96,22 +122,23 @@ impl ToolDispatcher {
     }
 
     /// Dispatch a tool call with structured JSON arguments from an LLM tool_calls response.
-    /// Extracts the primary string argument by trying "query", then "path", then the first
-    /// string value in the object. Falls back to the raw JSON string.
+    /// Calls handler.invoke_args() directly so tools can consume all their parameters.
     pub async fn execute_args(&self, name: &str, args: &serde_json::Value) -> String {
-        let query = if let Some(q) = args.get("query").and_then(|v| v.as_str()) {
-            q.to_string()
-        } else if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-            p.to_string()
-        } else if let Some(obj) = args.as_object() {
-            obj.values()
-                .find_map(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| args.to_string())
-        } else {
-            args.to_string()
-        };
-        self.invoke(name, &query).await
+        match self.tools.get(name) {
+            Some(handler) => handler.invoke_args(args).await,
+            None => {
+                let available = {
+                    let mut names: Vec<&str> =
+                        self.tools.keys().map(String::as_str).collect();
+                    names.sort();
+                    names.join(", ")
+                };
+                format!(
+                    "[Tool '{}' not registered — available: {}]",
+                    name, available
+                )
+            }
+        }
     }
 }
 
@@ -191,7 +218,9 @@ impl ToolHandler for ReadFileTool {
     fn name(&self) -> &str { "read_file" }
 
     fn description(&self) -> &str {
-        "Read a file from the allowed filesystem paths (up to 4000 characters)."
+        "Read a file from the allowed filesystem paths. Returns up to 100,000 characters \
+         starting at the given character offset. For large files, use 'offset' and 'limit' \
+         to read in sections — the response footer shows the next offset to use."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -201,6 +230,16 @@ impl ToolHandler for ReadFileTool {
                 "path": {
                     "type": "string",
                     "description": "Absolute file path (must be within allowed paths)"
+                },
+                "offset": {
+                    "type": "integer",
+                    "description": "Character position to start reading from (default: 0)",
+                    "default": 0
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum characters to return (default: 100000)",
+                    "default": 100000
                 }
             },
             "required": ["path"]
@@ -208,15 +247,21 @@ impl ToolHandler for ReadFileTool {
     }
 
     async fn invoke(&self, query: &str) -> String {
-        let path = query.trim();
-        let path_obj = match Path::new(path).canonicalize() {
+        // Plain-string callers: no offset/limit — delegate to invoke_args
+        self.invoke_args(&serde_json::json!({"path": query})).await
+    }
+
+    async fn invoke_args(&self, args: &serde_json::Value) -> String {
+        let path_str = match args.get("path").and_then(|v| v.as_str()) {
+            Some(p) => p.trim().to_string(),
+            None => return "[read_file: missing required 'path' argument]".to_string(),
+        };
+        let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(100_000) as usize;
+
+        let path_obj = match Path::new(&path_str).canonicalize() {
             Ok(p) => p,
-            Err(e) => {
-                return format!(
-                    "[read_file: cannot resolve path '{}': {}]",
-                    path, e
-                )
-            }
+            Err(e) => return format!("[read_file: cannot resolve path '{}': {}]", path_str, e),
         };
 
         let allowed: Vec<&str> = self.allowed_paths.split(',').map(str::trim).collect();
@@ -233,19 +278,41 @@ impl ToolHandler for ReadFileTool {
         if !permitted {
             return format!(
                 "[read_file: path '{}' not in allowed list — allowed prefixes: {}]",
-                path, self.allowed_paths
+                path_str, self.allowed_paths
             );
         }
 
         match std::fs::read_to_string(&path_obj) {
             Ok(content) => {
-                // Cap at 4000 chars — avoid overwhelming context
-                let cap = content
+                let total_chars = content.chars().count();
+                if offset >= total_chars && total_chars > 0 {
+                    return format!(
+                        "[read_file: offset {} exceeds file length {} chars]",
+                        offset, total_chars
+                    );
+                }
+                let start_byte = content
                     .char_indices()
-                    .nth(4000)
+                    .nth(offset)
                     .map(|(i, _)| i)
                     .unwrap_or(content.len());
-                content[..cap].to_string()
+                let end_byte = content
+                    .char_indices()
+                    .nth(offset + limit)
+                    .map(|(i, _)| i)
+                    .unwrap_or(content.len());
+                let slice = &content[start_byte..end_byte];
+                let next_offset = offset + limit;
+                if next_offset < total_chars {
+                    format!(
+                        "{}\n[... {} chars remaining — use offset={} to read next section]",
+                        slice,
+                        total_chars - next_offset,
+                        next_offset
+                    )
+                } else {
+                    slice.to_string()
+                }
             }
             Err(e) => format!("[read_file error: {}]", e),
         }
@@ -296,15 +363,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_file_caps_at_4000_chars() {
+    async fn read_file_caps_at_default_limit() {
         let dir = tempdir().unwrap();
         let allowed = dir.path().to_str().unwrap().to_string();
         let file = dir.path().join("big.txt");
-        std::fs::write(&file, "x".repeat(5000)).unwrap();
+        std::fs::write(&file, "x".repeat(120_000)).unwrap();
 
         let d = make_dispatcher_with_read(&allowed);
         let result = d.invoke("read_file", file.to_str().unwrap()).await;
-        assert_eq!(result.len(), 4000);
+        // Default 100k limit + continuation footer
+        assert!(result.starts_with(&"x".repeat(100_000)));
+        assert!(result.contains("remaining"));
+        assert!(result.contains("offset=100000"));
+    }
+
+    #[tokio::test]
+    async fn read_file_offset_reads_correct_section() {
+        let dir = tempdir().unwrap();
+        let allowed = dir.path().to_str().unwrap().to_string();
+        let file = dir.path().join("sections.txt");
+        // 200 'a' chars then 200 'b' chars
+        let content = "a".repeat(200) + &"b".repeat(200);
+        std::fs::write(&file, &content).unwrap();
+
+        let d = make_dispatcher_with_read(&allowed);
+        let args = serde_json::json!({"path": file.to_str().unwrap(), "offset": 200, "limit": 200});
+        let result = d.execute_args("read_file", &args).await;
+        assert_eq!(result, "b".repeat(200));
+    }
+
+    #[tokio::test]
+    async fn read_file_explicit_limit_respected() {
+        let dir = tempdir().unwrap();
+        let allowed = dir.path().to_str().unwrap().to_string();
+        let file = dir.path().join("limited.txt");
+        std::fs::write(&file, "z".repeat(1000)).unwrap();
+
+        let d = make_dispatcher_with_read(&allowed);
+        let args = serde_json::json!({"path": file.to_str().unwrap(), "limit": 500});
+        let result = d.execute_args("read_file", &args).await;
+        assert!(result.starts_with(&"z".repeat(500)));
+        assert!(result.contains("remaining"));
+    }
+
+    #[tokio::test]
+    async fn read_file_offset_beyond_end_returns_error() {
+        let dir = tempdir().unwrap();
+        let allowed = dir.path().to_str().unwrap().to_string();
+        let file = dir.path().join("short.txt");
+        std::fs::write(&file, "hello").unwrap();
+
+        let d = make_dispatcher_with_read(&allowed);
+        let args = serde_json::json!({"path": file.to_str().unwrap(), "offset": 9999});
+        let result = d.execute_args("read_file", &args).await;
+        assert!(result.contains("offset") && result.contains("exceeds"));
     }
 
     #[tokio::test]
