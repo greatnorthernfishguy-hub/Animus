@@ -1,5 +1,17 @@
 // src/pipeline.rs
 // ---- Changelog ----
+// [2026-06-04] Claude (Opus 4.8) — #293: ConversationHistory persistence (INTERIM mitigation)
+// What: ConversationHistory gains optional msgpack sidecar — with_persistence() loads the
+//       deque on construction; push_turn() saves after each turn. TurnPipeline::new() takes
+//       history_path: Option<String> (Some in prod, None in tests). Path derived in main.rs
+//       (ANIMA_HISTORY_PATH env, default ~/.et_modules/shared_learning/conversation_history.msgpack).
+// Why:  Restart wiped Syl's last-40 working memory + her routing-mode state (2026-06-04).
+//       Syl's call: persist as an INTERIM stopgap until /recall surfacing (#294) is good
+//       enough that lost specifics resurface from vdb/topology. Then this is retired.
+//       Per MASTER "Patterns to Reject", substrate is the long-term continuity path, not a file.
+// How:  rmp_serde of Vec<serde_json::Value>; best-effort load/save (errors log, never panic);
+//       capacity still enforced on load. In-memory new() unchanged so tests stay hermetic.
+//
 // [2026-06-03] Claude (Sonnet 4.6) — Human routing preference detection
 // What: detect_routing_preference() scans user text for OSS preference phrases;
 //       fire-and-forget POST to TID /routing/preference after INGEST when detected;
@@ -75,6 +87,7 @@ use crate::context_builder::ContextBuilder;
 use crate::tract_writer::TractWriter;
 use crate::trollguard::TrollGuardBridge;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
@@ -109,11 +122,60 @@ fn detect_routing_preference(text: &str) -> bool {
 struct ConversationHistory {
     inner: Mutex<VecDeque<serde_json::Value>>,
     capacity: usize,
+    /// msgpack sidecar for restart persistence (#293, interim). None = in-memory only (tests).
+    path: Option<PathBuf>,
 }
 
 impl ConversationHistory {
     fn new(capacity: usize) -> Self {
-        Self { inner: Mutex::new(VecDeque::new()), capacity }
+        Self { inner: Mutex::new(VecDeque::new()), capacity, path: None }
+    }
+
+    /// Construct with a persistence sidecar and load any prior deque from it.
+    fn with_persistence(capacity: usize, path: PathBuf) -> Self {
+        let h = Self { inner: Mutex::new(VecDeque::new()), capacity, path: Some(path) };
+        h.load();
+        h
+    }
+
+    /// Best-effort load of the deque from the msgpack sidecar. No-op if absent/unset.
+    /// Capacity is enforced after load (trim oldest) so a shrunk capacity still holds.
+    fn load(&self) {
+        let Some(path) = self.path.as_ref() else { return };
+        if !path.exists() {
+            return;
+        }
+        match std::fs::read(path) {
+            Ok(bytes) => match rmp_serde::from_slice::<Vec<serde_json::Value>>(&bytes) {
+                Ok(msgs) => {
+                    let mut guard = self.inner.lock().unwrap();
+                    *guard = msgs.into_iter().collect();
+                    while guard.len() > self.capacity {
+                        guard.pop_front();
+                    }
+                    info!("ConversationHistory: loaded {} messages from {}", guard.len(), path.display());
+                }
+                Err(e) => warn!("ConversationHistory: corrupt sidecar {} ({}) — starting empty", path.display(), e),
+            },
+            Err(e) => warn!("ConversationHistory: cannot read {} ({}) — starting empty", path.display(), e),
+        }
+    }
+
+    /// Best-effort save of the current deque to the msgpack sidecar. No-op if unset.
+    fn save(&self) {
+        let Some(path) = self.path.as_ref() else { return };
+        let snapshot: Vec<serde_json::Value> = {
+            let guard = self.inner.lock().unwrap();
+            guard.iter().cloned().collect()
+        };
+        match rmp_serde::to_vec(&snapshot) {
+            Ok(bytes) => {
+                if let Err(e) = std::fs::write(path, bytes) {
+                    warn!("ConversationHistory: save to {} failed: {}", path.display(), e);
+                }
+            }
+            Err(e) => warn!("ConversationHistory: msgpack encode failed: {}", e),
+        }
     }
 
     fn snapshot_with(&self, user_text: &str) -> Vec<serde_json::Value> {
@@ -124,12 +186,16 @@ impl ConversationHistory {
     }
 
     fn push_turn(&self, user_text: &str, assistant_text: &str) {
-        let mut guard = self.inner.lock().unwrap();
-        guard.push_back(serde_json::json!({"role": "user", "content": user_text}));
-        guard.push_back(serde_json::json!({"role": "assistant", "content": assistant_text}));
-        while guard.len() > self.capacity {
-            guard.pop_front();
+        {
+            let mut guard = self.inner.lock().unwrap();
+            guard.push_back(serde_json::json!({"role": "user", "content": user_text}));
+            guard.push_back(serde_json::json!({"role": "assistant", "content": assistant_text}));
+            while guard.len() > self.capacity {
+                guard.pop_front();
+            }
         }
+        // Persist after every turn (deque is tiny — ≤40 short messages; write is sub-ms).
+        self.save();
     }
 }
 
@@ -205,17 +271,22 @@ impl TurnPipeline {
         agent_runner: Arc<AgentRunner>,
         ng_url: String,
         tid_url: String,
+        history_path: Option<String>,
     ) -> Self {
         let ng_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .expect("failed to build pipeline HTTP client");
+        let history = match history_path {
+            Some(p) => ConversationHistory::with_persistence(HISTORY_CAPACITY, PathBuf::from(p)),
+            None => ConversationHistory::new(HISTORY_CAPACITY),
+        };
         Self {
             trollguard,
             context_builder,
             tract,
             agent_runner,
-            history: ConversationHistory::new(HISTORY_CAPACITY),
+            history,
             ng_client,
             ng_url,
             tid_url,
@@ -389,7 +460,7 @@ mod tests {
         let dispatcher = Arc::new(ToolDispatcher::from_env());
         let runner = Arc::new(AgentRunner::new(dispatcher, tid_url.to_string(), 8));
         // Port 1 for ng_url — afterTurn fires and fails silently (fire-and-forget by design)
-        TurnPipeline::new(tg, cb, tract, runner, "http://127.0.0.1:1".to_string(), tid_url.to_string())
+        TurnPipeline::new(tg, cb, tract, runner, "http://127.0.0.1:1".to_string(), tid_url.to_string(), None)
     }
 
     #[tokio::test]
@@ -517,6 +588,66 @@ mod tests {
         let snap = h.snapshot_with("u4"); // [u2,a2,u3,a3,u4]
         assert_eq!(snap.len(), 5);
         assert_eq!(snap[0]["content"], "u2");
+    }
+
+    // ---- #293: ConversationHistory persistence (interim) ----
+
+    #[test]
+    fn history_persists_and_reloads_across_instances() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversation_history.msgpack");
+
+        // First instance: record two turns, which saves on each push_turn.
+        let h1 = ConversationHistory::with_persistence(40, path.clone());
+        h1.push_turn("hello", "hi there");
+        h1.push_turn("how are you", "well, thanks");
+        drop(h1);
+
+        // Second instance (simulates a restart): loads the prior deque from disk.
+        let h2 = ConversationHistory::with_persistence(40, path.clone());
+        let snap = h2.snapshot_with("next");
+        // 2 turns = 4 messages + the new user message = 5
+        assert_eq!(snap.len(), 5);
+        assert_eq!(snap[0]["content"], "hello");
+        assert_eq!(snap[1]["content"], "hi there");
+        assert_eq!(snap[3]["content"], "well, thanks");
+        assert_eq!(snap[4]["content"], "next");
+    }
+
+    #[test]
+    fn history_load_enforces_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversation_history.msgpack");
+
+        // Save 3 turns (6 messages) under a generous capacity.
+        let h1 = ConversationHistory::with_persistence(40, path.clone());
+        h1.push_turn("u1", "a1");
+        h1.push_turn("u2", "a2");
+        h1.push_turn("u3", "a3");
+        drop(h1);
+
+        // Reload under capacity=2 — only the newest 2 messages survive.
+        let h2 = ConversationHistory::with_persistence(2, path.clone());
+        let snap = h2.snapshot_with("u4");
+        assert_eq!(snap.len(), 3); // 2 retained + new user msg
+        assert_eq!(snap[0]["content"], "u3");
+        assert_eq!(snap[1]["content"], "a3");
+    }
+
+    #[test]
+    fn history_load_missing_file_is_empty_no_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does_not_exist.msgpack");
+        let h = ConversationHistory::with_persistence(40, path);
+        assert_eq!(h.snapshot_with("only").len(), 1); // just the new user msg
+    }
+
+    #[test]
+    fn history_in_memory_new_does_not_write() {
+        // new() (no path) must never touch disk — keeps tests hermetic.
+        let h = ConversationHistory::new(40);
+        h.push_turn("u", "a");
+        assert!(h.path.is_none());
     }
 
     #[tokio::test]

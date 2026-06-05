@@ -128,6 +128,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_iter,
     ));
 
+    // ConversationHistory persistence sidecar (#293, interim) — same shared_learning
+    // convention as budget/wants, env-overridable (LAW 5).
+    let history_path = std::env::var("ANIMA_HISTORY_PATH").unwrap_or_else(|_| {
+        std::env::var("HOME")
+            .map(|h| format!("{}/.et_modules/shared_learning/conversation_history.msgpack", h))
+            .unwrap_or_else(|_| "/tmp/conversation_history.msgpack".to_string())
+    });
+
     let pipeline = Arc::new(TurnPipeline::new(
         Arc::clone(&tg),
         Arc::clone(&context_builder),
@@ -135,6 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&agent_runner),
         cfg.ng_url.clone(),
         cfg.tid_url.clone(),
+        Some(history_path),
     ));
 
     let cli = Arc::new(CliAdapter::new(

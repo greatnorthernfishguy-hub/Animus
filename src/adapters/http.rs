@@ -181,6 +181,7 @@ mod tests {
             runner,
             "http://127.0.0.1:1".to_string(),
             "http://127.0.0.1:1".to_string(), // TID unreachable in tests — preference call fails silently
+            None, // no history persistence in tests
         ))
     }
 
