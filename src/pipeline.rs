@@ -330,11 +330,7 @@ impl TurnPipeline {
 
         // INGEST — raw experience pre-BUILD (Law 7: substrate receives input before it is acted upon)
         { let mut s = self.status.lock().unwrap(); s.stage = Stage::Ingest; s.stage_state = StageState::Running; }
-        self.tract.deposit_event_silent("turn_ingest", serde_json::json!({
-            "text": clean_text,
-            "channel_id": ctx.channel_id,
-            "user_id": ctx.user_id,
-        }));
+        self.tract.deposit_experience_silent("anima", clean_text.as_bytes());
         { let mut s = self.status.lock().unwrap(); s.stage_state = StageState::Done; }
 
         // PREFERENCE SIGNAL — detect natural language routing preferences and notify TID
