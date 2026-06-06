@@ -4,6 +4,10 @@
 # Why: Project scaffold — all deps pulled in now so resolution happens once
 # How: Standard Cargo workspace with bin + lib targets, serenity for Discord (Phase 2)
 #      rustls used throughout (pure-Rust TLS) — avoids libssl-dev system dependency
+# [2026-06-06] Claude (Sonnet 4.6) — Task 3: add ng_tract dep (BTF experience writes)
+# What: ng_tract path dep with default-features=false (pure Rust, no pyo3/numpy/BLAS)
+# Why: Plan Task 3 — TractWriter gains deposit_experience/deposit_experience_silent
+# How: Consumes only ng_tract::format, read, write — engine/python features excluded
 # -------------------
 
 [package]
@@ -36,6 +40,7 @@ tokio-util = "0.7"
 rmp-serde = "1.3"
 async-trait = "0.1"
 axum = { version = "0.7", features = ["json"] }
+ng_tract = { path = "../UniAI/rust_core", default-features = false }
 
 [dev-dependencies]
 mockito = "1"

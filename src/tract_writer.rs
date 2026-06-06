@@ -90,4 +90,71 @@ impl TractWriter {
             warn!("Tract write failed ({}): {}", event_type, e);
         }
     }
+
+    /// Deposit raw bytes as a BTF ExperienceEntry to the tract.
+    /// source: originating module (e.g. "anima"), content is raw bytes (e.g. UTF-8 text).
+    /// content_type is always "text" for conversation turns.
+    pub fn deposit_experience(&self, source: &str, content: &[u8]) -> Result<(), String> {
+        use ng_tract::ExperienceEntry;
+        use ng_tract::write::{write_experience, deposit_to_file};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+
+        let entry = ExperienceEntry {
+            timestamp,
+            source: source.to_string(),
+            content_type: "text".to_string(),
+            content: content.to_vec(),
+        };
+
+        let bytes = write_experience(&entry);
+        deposit_to_file(&self.path, &bytes)
+            .map_err(|e| format!("deposit_experience failed: {e}"))
+    }
+
+    /// deposit_experience without crashing the turn pipeline on failure.
+    pub fn deposit_experience_silent(&self, source: &str, content: &[u8]) {
+        if let Err(e) = self.deposit_experience(source, content) {
+            warn!("Tract experience write failed: {}", e);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ng_tract::read::{TractReader, ReadResult};
+    use ng_tract::TractEntry;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn deposit_experience_writes_readable() {
+        let tmp = NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_str().expect("utf8 path").to_string();
+
+        let writer = TractWriter::new(&path);
+        let text = b"hello from anima";
+        writer.deposit_experience("anima", text).expect("deposit_experience returned Err");
+
+        let data = std::fs::read(&path).expect("read tract file");
+        let mut reader = TractReader::new(&data);
+        let result = reader.next_entry()
+            .expect("no entry in file")
+            .expect("entry parse error");
+
+        match result {
+            ReadResult::Entry(TractEntry::Experience(e)) => {
+                assert_eq!(e.source, "anima");
+                assert_eq!(e.content_type, "text");
+                assert_eq!(e.content, text);
+            }
+            other => panic!("expected Experience entry, got {:?}", other),
+        }
+
+        assert!(reader.next_entry().is_none(), "expected exactly one entry");
+    }
 }
