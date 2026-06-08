@@ -251,6 +251,16 @@ pub struct TurnContext {
     pub source: SourceType,
 }
 
+/// Read + clear a one-shot credit-notice file (written by TID on a funded 402).
+/// Returns the notice text, or None if absent/malformed. Delivered once. [2026-06-07]
+fn read_credit_notice_file(path: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let _ = std::fs::remove_file(path);
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
+}
+
 pub struct TurnPipeline {
     trollguard: Arc<TrollGuardBridge>,
     context_builder: Arc<ContextBuilder>,
@@ -311,9 +321,18 @@ impl TurnPipeline {
     }
 
     /// Take any pending system notice to surface on this turn's response,
-    /// clearing it so it is delivered exactly once. [2026-06-07]
+    /// clearing it so it is delivered exactly once. Two sources: the in-process
+    /// Arc (BudgetMonitor critical-edge / future management-key path) and a
+    /// cross-process file written by TID on a funded 402 (reactive ground-truth
+    /// out-of-credits — Feature B option C). [2026-06-07]
     pub fn take_pending_notice(&self) -> Option<String> {
-        self.pending_notice.lock().ok().and_then(|mut g| g.take())
+        if let Some(n) = self.pending_notice.lock().ok().and_then(|mut g| g.take()) {
+            return Some(n);
+        }
+        let path = std::env::var("HOME")
+            .ok()
+            .map(|h| format!("{}/.et_modules/shared_learning/credit_notice.json", h))?;
+        read_credit_notice_file(&path)
     }
 
     pub async fn run(&self, ctx: TurnContext) -> String {
@@ -464,6 +483,17 @@ mod tests {
     use crate::tract_writer::TractWriter;
     use crate::trollguard::TrollGuardBridge;
     use httpmock::prelude::*;
+
+    #[test]
+    fn credit_notice_file_read_and_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credit_notice.json");
+        std::fs::write(&path, r#"{"text":"openrouter out of credits","provider":"openrouter"}"#).unwrap();
+        let got = read_credit_notice_file(path.to_str().unwrap());
+        assert_eq!(got.as_deref(), Some("openrouter out of credits"));
+        assert!(!path.exists());
+        assert!(read_credit_notice_file(path.to_str().unwrap()).is_none());
+    }
 
     fn make_pipeline(tg_url: &str, tid_url: &str) -> TurnPipeline {
         let tg = Arc::new(TrollGuardBridge::new(tg_url));
