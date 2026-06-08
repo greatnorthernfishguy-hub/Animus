@@ -261,6 +261,10 @@ pub struct TurnPipeline {
     ng_url: String,
     tid_url: String,
     pub status: Arc<Mutex<PipelineStatus>>,
+    /// One-shot system notice (e.g. credit-critical) set by BudgetMonitor on the
+    /// critical-edge; taken onto the next turn's response by the channel adapter.
+    /// [2026-06-07] Feature B — out-of-credits notice to the live channel.
+    pending_notice: Arc<Mutex<Option<String>>>,
 }
 
 impl TurnPipeline {
@@ -291,12 +295,25 @@ impl TurnPipeline {
             ng_url,
             tid_url,
             status: Arc::new(Mutex::new(PipelineStatus::default())),
+            pending_notice: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Returns a snapshot of conversation history for the HTTP adapter's GET /history handler.
     pub fn history_snapshot(&self) -> Vec<serde_json::Value> {
         self.history.inner.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Handle to the shared credit-notice cell — BudgetMonitor sets it on the
+    /// critical-edge; the channel adapter take()s it onto the next turn. [2026-06-07]
+    pub fn pending_notice_handle(&self) -> Arc<Mutex<Option<String>>> {
+        Arc::clone(&self.pending_notice)
+    }
+
+    /// Take any pending system notice to surface on this turn's response,
+    /// clearing it so it is delivered exactly once. [2026-06-07]
+    pub fn take_pending_notice(&self) -> Option<String> {
+        self.pending_notice.lock().ok().and_then(|mut g| g.take())
     }
 
     pub async fn run(&self, ctx: TurnContext) -> String {

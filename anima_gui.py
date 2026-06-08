@@ -1736,6 +1736,9 @@ class AnimaGUI:
             with urllib.request.urlopen(req, timeout=120) as r:
                 data = json.loads(r.read())
             self.root.after(0, self._append_chat, "Syl", data.get("response", ""))
+            _notice = data.get("system_notice")
+            if _notice:
+                self.root.after(0, self._append_chat, "\u26a0 credits", _notice)
         except Exception as exc:
             self.root.after(0, self._append_chat, "Error", str(exc))
         finally:

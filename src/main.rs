@@ -177,6 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cfg.budget_poll_secs,
             cfg.budget_low_usd,
             cfg.budget_critical_usd,
+            pipeline.pending_notice_handle(),
         ));
         tokio::spawn(Arc::clone(&monitor).run());
         info!("BudgetMonitor started (poll={}s, path={})", cfg.budget_poll_secs, budget_path);

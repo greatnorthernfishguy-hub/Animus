@@ -12,7 +12,7 @@
 
 use reqwest::Client;
 use serde::Deserialize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time;
 use tracing::warn;
@@ -34,6 +34,14 @@ pub struct BudgetMonitor {
     poll_interval: Duration,
     low_threshold_usd: f64,
     critical_threshold_usd: f64,
+    pending_notice: Arc<Mutex<Option<String>>>,
+}
+
+/// Edge detector: queue a credit notice only on the transition INTO critical
+/// (critical now, not critical last poll) so the live channel is not spammed,
+/// and it re-arms if credits recover then fall again. [2026-06-07]
+fn should_queue_notice(critical: bool, was_critical: bool) -> bool {
+    critical && !was_critical
 }
 
 impl BudgetMonitor {
@@ -43,6 +51,7 @@ impl BudgetMonitor {
         poll_secs: u64,
         low_usd: f64,
         critical_usd: f64,
+        pending_notice: Arc<Mutex<Option<String>>>,
     ) -> Self {
         Self {
             api_key,
@@ -50,6 +59,7 @@ impl BudgetMonitor {
             poll_interval: Duration::from_secs(poll_secs),
             low_threshold_usd: low_usd,
             critical_threshold_usd: critical_usd,
+            pending_notice,
         }
     }
 
@@ -57,6 +67,7 @@ impl BudgetMonitor {
         let client = Client::new();
         let mut interval = time::interval(self.poll_interval);
         interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        let mut was_critical = false;
         loop {
             interval.tick().await;
             match self.poll_openrouter(&client).await {
@@ -66,6 +77,16 @@ impl BudgetMonitor {
                     if let Err(e) = self.write_budget_flag(remaining, low, critical) {
                         warn!("BudgetMonitor: write failed: {}", e);
                     }
+                    if should_queue_notice(critical, was_critical) {
+                        if let Ok(mut g) = self.pending_notice.lock() {
+                            *g = Some(format!(
+                                "\u{26a0} OpenRouter credits critical (${:.2} remaining) \u{2014} refund to restore Syl's full routing.",
+                                remaining
+                            ));
+                        }
+                        warn!("BudgetMonitor: credit-critical edge \u{2014} notice queued for live channel");
+                    }
+                    was_critical = critical;
                     if low {
                         warn!(
                             "Inference budget {}: ${:.2} remaining",
@@ -125,7 +146,15 @@ mod tests {
     use tempfile::tempdir;
 
     fn make_monitor(path: &str) -> BudgetMonitor {
-        BudgetMonitor::new("test_key".into(), path.to_string(), 300, 10.0, 2.0)
+        BudgetMonitor::new("test_key".into(), path.to_string(), 300, 10.0, 2.0, Arc::new(Mutex::new(None)))
+    }
+
+    #[test]
+    fn notice_queues_only_on_critical_edge() {
+        assert!(should_queue_notice(true, false));    // entered critical
+        assert!(!should_queue_notice(true, true));    // still critical, no repeat
+        assert!(!should_queue_notice(false, true));   // recovered
+        assert!(!should_queue_notice(false, false));  // healthy
     }
 
     #[test]

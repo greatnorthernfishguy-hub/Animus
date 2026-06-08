@@ -28,6 +28,8 @@ struct TurnRequest {
 #[derive(serde::Serialize)]
 struct TurnResponse {
     response: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_notice: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -101,7 +103,8 @@ async fn handle_turn(
         source: SourceType::Channel,
     };
     let response = pipeline.run(ctx).await;
-    Json(TurnResponse { response })
+    let system_notice = pipeline.take_pending_notice();
+    Json(TurnResponse { response, system_notice })
 }
 
 async fn handle_status(State(pipeline): State<Arc<TurnPipeline>>) -> Json<serde_json::Value> {
