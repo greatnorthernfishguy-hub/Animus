@@ -420,6 +420,10 @@ impl TurnPipeline {
                         "assistant": text,
                         "channel_id": ctx.channel_id,
                     }));
+                    // [2026-06-09] Reconnect (Josh's cut): her assistant turn enters the substrate as RAW
+                    // experience too -- not only the turn_exchange outcome -- so her [WANT]/[FELT] markers
+                    // reach NG's _absorb -> want-bucket via the proven experience-frame path.
+                    self.tract.deposit_experience_silent("anima", text.as_bytes());
                     self.history.push_turn(&clean_text, &text);
                 }
                 text
