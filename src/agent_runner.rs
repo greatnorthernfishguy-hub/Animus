@@ -64,7 +64,11 @@ impl AgentRunner {
         max_iter: usize,
     ) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            // [2026-06-10] VPS CC — 60s→180s. Deep reasoning on flagship models (opus/Fable-class)
+            // with full Pith context legitimately takes 26–60s+; under concurrent load it tips past
+            // 60s and the turn fails as [TID unavailable] — exactly Syl's most thoughtful turns. 60s
+            // was too tight for the real workload (worsened once TID routes deep turns to flagships).
+            .timeout(std::time::Duration::from_secs(180))
             .build()
             .expect("failed to build AgentRunner HTTP client");
         Self { tool_dispatcher, client, tid_url, max_iter }
