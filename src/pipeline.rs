@@ -1,5 +1,14 @@
 // src/pipeline.rs
 // ---- Changelog ----
+// [2026-06-14] Claude Code (Opus 4.8) — #322: afterTurn client timeout 5s -> 60s (restore signal)
+// What: ng_client builder timeout 5s -> 60s. ng_client serves only fire-and-forget spawns
+//       (afterTurn, routing-preference), never the turn-latency path.
+// Why:  afterTurn (NG graph.step + STDP + deposits + #294 dual-pass ONNX embeds) legitimately
+//       takes >5s, so last_after_turn read "failed" EVERY turn — a broken smoke detector that
+//       masked genuine afterTurn failures. NG completes the work regardless (ThreadingHTTPServer);
+//       this only makes the status truthful: "failed" now means a real hang/death, not slowness.
+// How:  one-line timeout bump; no latency impact (fire-and-forget). Ack-first was rejected — it
+//       would make the status always-"ok", masking failures the other way.
 // [2026-06-04] Claude (Opus 4.8) — #293: ConversationHistory persistence (INTERIM mitigation)
 // What: ConversationHistory gains optional msgpack sidecar — with_persistence() loads the
 //       deque on construction; push_turn() saves after each turn. TurnPipeline::new() takes
@@ -288,7 +297,14 @@ impl TurnPipeline {
         history_path: Option<String>,
     ) -> Self {
         let ng_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
+            // 60s (was 5s) — #322. ng_client is used ONLY for fire-and-forget spawns (afterTurn,
+            // routing-preference), never the turn-latency path, so a long timeout adds no latency.
+            // afterTurn does NG graph.step + STDP + deposits + the #294 dual-pass ONNX embeds —
+            // legitimately >5s — so a 5s timeout marked last_after_turn "failed" EVERY turn: a
+            // broken smoke detector that masked real failures. 60s lets the spawn await actual
+            // completion, so "failed" now means a genuine hang/death. (NG finishes the work
+            // regardless via ThreadingHTTPServer; this only fixes the status signal.)
+            .timeout(std::time::Duration::from_secs(60))
             .build()
             .expect("failed to build pipeline HTTP client");
         let history = match history_path {
