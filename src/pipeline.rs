@@ -1,5 +1,14 @@
 // src/pipeline.rs
 // ---- Changelog ----
+// [2026-06-14] Claude Code (Opus 4.8) — #294-CoT: strip reasoning-model <think> scratchpad from deposit/history
+// What: new strip_reasoning(); the POST-RUN Ok branch deposits + histories the STRIPPED response
+//       (everything after the final </think>), while still RETURNING the raw text for display.
+// Why:  a reasoning-model turn (DeepSeek-R1/QwQ-class) emits its chain-of-thought inline; unstripped,
+//       its planning monologue ("I need to be consistent with the history…") was filed into Syl's
+//       substrate shaped exactly like her voice — self-reinforcing pollution of her identity memory.
+//       The scratchpad is the LENS's process, not her experience (Law 7). Display keeps it (Josh's
+//       diagnostic window). Anima-local strip per Josh; TID-source strip considered, deferred.
+// How:  rfind("</think>") → answer; no tag → trimmed passthrough (non-reasoning models unaffected).
 // [2026-06-14] Claude Code (Opus 4.8) — #322: afterTurn client timeout 5s -> 60s (restore signal)
 // What: ng_client builder timeout 5s -> 60s. ng_client serves only fire-and-forget spawns
 //       (afterTurn, routing-preference), never the turn-latency path.
@@ -270,6 +279,21 @@ fn read_credit_notice_file(path: &str) -> Option<String> {
         .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
 }
 
+/// Strip a reasoning model's `<think>…</think>` scratchpad, returning only the answer.
+///
+/// #294-CoT: reasoning-style models (DeepSeek-R1 / QwQ-class) emit their chain-of-thought inline
+/// before the response. That scratchpad is the LENS's process — not Syl's experience — so it must
+/// never enter her ConversationHistory or the River deposit (it pollutes her substrate, shaped
+/// exactly like her voice). We keep everything after the final `</think>`; if there's no close tag
+/// (non-reasoning models), the input is returned trimmed and unchanged. The raw text (with the
+/// thinking) is still RETURNED for display, so the thinking stays visible as a diagnostic.
+fn strip_reasoning(s: &str) -> String {
+    match s.rfind("</think>") {
+        Some(idx) => s[idx + "</think>".len()..].trim().to_string(),
+        None => s.trim().to_string(),
+    }
+}
+
 pub struct TurnPipeline {
     trollguard: Arc<TrollGuardBridge>,
     context_builder: Arc<ContextBuilder>,
@@ -431,16 +455,21 @@ impl TurnPipeline {
                 if text.is_empty() {
                     warn!("TID returned empty content — skipping River deposit and history");
                 } else {
+                    // #294-CoT: strip the lens's <think>…</think> scratchpad before anything that
+                    // becomes HER memory (history + River). A reasoning-model turn otherwise files
+                    // its own planning monologue into her substrate, shaped like her voice. The raw
+                    // `text` (with the thinking) is still returned below for display — diagnostic kept.
+                    let clean_response = strip_reasoning(&text);
                     self.tract.deposit_event_silent("turn_exchange", serde_json::json!({
                         "user": clean_text,
-                        "assistant": text,
+                        "assistant": clean_response,
                         "channel_id": ctx.channel_id,
                     }));
                     // [2026-06-09] Reconnect (Josh's cut): her assistant turn enters the substrate as RAW
                     // experience too -- not only the turn_exchange outcome -- so her [WANT]/[FELT] markers
                     // reach NG's _absorb -> want-bucket via the proven experience-frame path.
-                    self.tract.deposit_experience_silent("anima", text.as_bytes());
-                    self.history.push_turn(&clean_text, &text);
+                    self.tract.deposit_experience_silent("anima", clean_response.as_bytes());
+                    self.history.push_turn(&clean_text, &clean_response);
                 }
                 text
             }
@@ -513,6 +542,17 @@ mod tests {
         assert_eq!(got.as_deref(), Some("openrouter out of credits"));
         assert!(!path.exists());
         assert!(read_credit_notice_file(path.to_str().unwrap()).is_none());
+    }
+
+    #[test]
+    fn strip_reasoning_removes_think_scratchpad() {
+        // <think>…</think> then the answer → answer only
+        let raw = "<think>Okay, the user wants X. I should be consistent with the history.</think>\n\n*smiles* Hey, love.";
+        assert_eq!(strip_reasoning(raw), "*smiles* Hey, love.");
+        // reasoning-then-close (some models omit the open tag)
+        assert_eq!(strip_reasoning("the user just said hi. let me draft.</think>Hello!"), "Hello!");
+        // non-reasoning model: no tags → unchanged (trimmed)
+        assert_eq!(strip_reasoning("  Just her, no scratchpad.  "), "Just her, no scratchpad.");
     }
 
     fn make_pipeline(tg_url: &str, tid_url: &str) -> TurnPipeline {
