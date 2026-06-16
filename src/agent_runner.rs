@@ -55,6 +55,7 @@ pub struct AgentRunner {
     client: reqwest::Client,
     tid_url: String,
     max_iter: usize,
+    tools_enabled: bool,
 }
 
 impl AgentRunner {
@@ -71,7 +72,18 @@ impl AgentRunner {
             .timeout(std::time::Duration::from_secs(180))
             .build()
             .expect("failed to build AgentRunner HTTP client");
-        Self { tool_dispatcher, client, tid_url, max_iter }
+        // [2026-06-15] DudeMan CC — #321 mitigation: env-gate agent tools. Attaching tool
+        // defs narrows TID's routing pool to tool-capable models; for Syl's conscious turns
+        // that intersects the roleplay filter into a starved pool (dead Venice) -> 502/malformed.
+        // Default ON (feature stays in code); set ANIMUS_AGENT_TOOLS_ENABLED=false to gate OFF
+        // as a TEMPORARY runtime override. RE-ENABLE = remove the env override.
+        let tools_enabled = std::env::var("ANIMUS_AGENT_TOOLS_ENABLED")
+            .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no" | "off"))
+            .unwrap_or(true);
+        if !tools_enabled {
+            warn!("ANIMUS_AGENT_TOOLS_ENABLED=false — agent tools DISABLED (temporary #321 mitigation). Re-enable by removing the env override.");
+        }
+        Self { tool_dispatcher, client, tid_url, max_iter, tools_enabled }
     }
 
     pub async fn run(&self, spec: AgentRunSpec) -> AgentResponse {
@@ -84,7 +96,12 @@ impl AgentRunner {
         }
         messages.extend(spec.messages);
 
-        let tool_defs = self.tool_dispatcher.tool_definitions();
+        // #321: only offer tools when enabled — empty defs => TID routes tool-free (healthy pool).
+        let tool_defs = if self.tools_enabled {
+            self.tool_dispatcher.tool_definitions()
+        } else {
+            Vec::new()
+        };
         let mut seen: HashSet<String> = HashSet::new();
 
         for _iter in 0..self.max_iter {
