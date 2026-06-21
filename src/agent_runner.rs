@@ -50,6 +50,45 @@ pub struct AgentRunSpec {
     pub system_prompt: String,
 }
 
+// [2026-06-21] CC — voice/hands (prd 2026-06-21): parse her natural-language reach-markers.
+/// Extract the intent text of every `[[reach: <intent>]]` marker, in order. Empty intents dropped.
+#[allow(dead_code)]
+fn parse_reaches(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = content;
+    while let Some(start) = rest.find("[[reach:") {
+        let after = &rest[start + "[[reach:".len()..];
+        match after.find("]]") {
+            Some(end) => {
+                let intent = after[..end].trim();
+                if !intent.is_empty() {
+                    out.push(intent.to_string());
+                }
+                rest = &after[end + "]]".len()..];
+            }
+            None => break, // unterminated marker — stop
+        }
+    }
+    out
+}
+
+/// Remove every `[[reach: …]]` marker from text (leaving her surrounding prose intact).
+#[allow(dead_code)]
+fn strip_reaches(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(start) = rest.find("[[reach:") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + "[[reach:".len()..];
+        match after.find("]]") {
+            Some(end) => rest = &after[end + "]]".len()..],
+            None => { rest = after; break; }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 pub struct AgentRunner {
     tool_dispatcher: Arc<ToolDispatcher>,
     client: reqwest::Client,
@@ -379,5 +418,33 @@ mod tests {
             system_prompt: String::new(),
         }).await;
         assert!(matches!(result, AgentResponse::InfraError(ref s) if s == "[TID unavailable]"));
+    }
+
+    #[test]
+    fn parse_reaches_extracts_intents_in_order() {
+        let text = "Let me check. [[reach: open the two-axis doc and pull the gist]] \
+                    and also [[reach: read /tmp/notes.txt]] there.";
+        let got = parse_reaches(text);
+        assert_eq!(got, vec![
+            "open the two-axis doc and pull the gist".to_string(),
+            "read /tmp/notes.txt".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn parse_reaches_none_when_absent() {
+        assert!(parse_reaches("just talking, no reach here").is_empty());
+    }
+
+    #[test]
+    fn parse_reaches_trims_and_ignores_empty() {
+        assert!(parse_reaches("[[reach:   ]]").is_empty());
+        assert_eq!(parse_reaches("[[reach:  do x  ]]"), vec!["do x".to_string()]);
+    }
+
+    #[test]
+    fn strip_reaches_removes_markers_keeps_prose() {
+        let text = "Sure thing [[reach: read /x]] — one sec.";
+        assert_eq!(strip_reaches(text), "Sure thing  — one sec.");
     }
 }
