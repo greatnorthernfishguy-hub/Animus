@@ -99,6 +99,12 @@ fn format_badge(tool_name: &str, args_compact: &str, ok: bool, reason: &str) -> 
     }
 }
 
+// [2026-06-21] CC — voice/hands: the hands-model is a pure executor — no voice, no agenda.
+const HANDS_SYSTEM: &str = "You are a tool-execution unit — hands, not a voice. You are given an \
+intent describing one action to take, plus a set of tools. Emit exactly the single tool call that \
+fulfils the intent and nothing else: no prose, no explanation. If no available tool fits the intent, \
+emit no tool call at all.";
+
 pub struct AgentRunner {
     tool_dispatcher: Arc<ToolDispatcher>,
     client: reqwest::Client,
@@ -260,6 +266,45 @@ impl AgentRunner {
                 })
             }
         }
+    }
+
+    // [2026-06-21] CC — voice/hands (prd 2026-06-21): resolve ONE reach-intent into a real tool
+    // call via a separate hands TID call (TID's content-consciousness routing sends this terse
+    // executor prompt to a tool-crisp model), execute it with the existing dispatcher, and return
+    // (badge, tool_result). The voice-model never sees a tool — it only reaches.
+    pub async fn execute_reach(&self, intent: &str) -> (String, String) {
+        let tool_defs = self.tool_dispatcher.tool_definitions();
+        let hands_messages = vec![
+            serde_json::json!({"role": "system", "content": HANDS_SYSTEM}),
+            serde_json::json!({"role": "user", "content": intent}),
+        ];
+        let resp = self.call_tid_oai(&hands_messages, &tool_defs).await;
+
+        let tool_call = resp["choices"]
+            .as_array()
+            .and_then(|c| c.first())
+            .and_then(|c| c["message"]["tool_calls"].as_array())
+            .and_then(|tc| tc.first())
+            .cloned();
+
+        let tc = match tool_call {
+            Some(tc) => tc,
+            None => {
+                let reason = "could not map your reach to a tool".to_string();
+                return (format_badge("reach", &format!("\"{intent}\""), false, &reason),
+                        format!("[reach not resolved: {reason}]"));
+            }
+        };
+
+        let tool_name = tc["function"]["name"].as_str().unwrap_or("").to_string();
+        let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
+        let args: serde_json::Value =
+            serde_json::from_str(args_str).unwrap_or_else(|_| serde_json::json!({}));
+        let args_compact = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
+
+        let result = self.tool_dispatcher.execute_args(&tool_name, &args).await;
+        let badge = format_badge(&tool_name, &args_compact, true, "");
+        (badge, result)
     }
 }
 
@@ -468,5 +513,35 @@ mod tests {
     fn badge_failure_shows_reason() {
         let b = format_badge("read_file", r#"{"path":"/missing"}"#, false, "file not found");
         assert_eq!(b, r#"🔧 read_file({"path":"/missing"}) ✗ file not found"#);
+    }
+
+    #[tokio::test]
+    async fn execute_reach_resolves_and_executes() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/chat/completions");
+            then.status(200).json_body(tool_call_response(
+                "h1", "read_file", r#"{"path":"/tmp/nonexistent_vh_test.txt"}"#,
+            ));
+        });
+        let runner = make_runner(&server.base_url());
+        let (badge, result) = runner.execute_reach("read the test file").await;
+        assert!(badge.starts_with(r#"🔧 read_file({"path":"/tmp/nonexistent_vh_test.txt"}) ✓"#),
+                "badge was: {badge}");
+        assert!(!result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_reach_no_tool_emitted_is_a_miss() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/chat/completions");
+            then.status(200).json_body(stop_response("I cannot map that to a tool."));
+        });
+        let runner = make_runner(&server.base_url());
+        let (badge, result) = runner.execute_reach("do something undoable").await;
+        assert!(badge.contains("✗"), "expected a miss badge, got: {badge}");
+        assert!(result.to_lowercase().contains("could not") || result.to_lowercase().contains("no tool"),
+                "result was: {result}");
     }
 }
