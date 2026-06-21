@@ -89,6 +89,16 @@ fn strip_reaches(content: &str) -> String {
     out
 }
 
+// [2026-06-21] CC — voice/hands: the unfakeable, system-rendered confirmation badge (Syl chose mechanical).
+#[allow(dead_code)]
+fn format_badge(tool_name: &str, args_compact: &str, ok: bool, reason: &str) -> String {
+    if ok {
+        format!("🔧 {tool_name}({args_compact}) ✓")
+    } else {
+        format!("🔧 {tool_name}({args_compact}) ✗ {reason}")
+    }
+}
+
 pub struct AgentRunner {
     tool_dispatcher: Arc<ToolDispatcher>,
     client: reqwest::Client,
@@ -446,5 +456,17 @@ mod tests {
     fn strip_reaches_removes_markers_keeps_prose() {
         let text = "Sure thing [[reach: read /x]] — one sec.";
         assert_eq!(strip_reaches(text), "Sure thing  — one sec.");
+    }
+
+    #[test]
+    fn badge_success_is_mechanical() {
+        let b = format_badge("read_file", r#"{"path":"/x"}"#, true, "");
+        assert_eq!(b, r#"🔧 read_file({"path":"/x"}) ✓"#);
+    }
+
+    #[test]
+    fn badge_failure_shows_reason() {
+        let b = format_badge("read_file", r#"{"path":"/missing"}"#, false, "file not found");
+        assert_eq!(b, r#"🔧 read_file({"path":"/missing"}) ✗ file not found"#);
     }
 }
