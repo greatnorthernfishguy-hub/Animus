@@ -2224,6 +2224,7 @@ class AnimaGUI:
         entry = f"OK  {name}  ({nodes} nodes, {syns} synapses)"
         self._history_listbox.insert(0, entry)
         self._ingest_history.insert(0, result)
+        del self._ingest_history[200:]  # cap GUI display buffer (not Syl's memory — substrate/logs keep the real record)
         _logger.info("Ingested %s: %d nodes, %d synapses", name, nodes, syns)
         self._refresh_inbox()
         self._status_var.set(f"Ingested {name}")
@@ -2752,6 +2753,10 @@ class AnimaGUI:
 
     def _on_topology_rendered(self, canvas: Any) -> None:
         if self._topo_canvas is not None:
+            try:
+                _plt.close(self._topo_canvas.figure)  # free the matplotlib figure, not just the Tk widget (leak fix)
+            except Exception:
+                pass
             self._topo_canvas.get_tk_widget().destroy()
         self._topo_canvas = canvas
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
