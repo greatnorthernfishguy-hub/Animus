@@ -98,6 +98,32 @@ fn format_badge(tool_name: &str, args_compact: &str, ok: bool, reason: &str) -> 
     }
 }
 
+// [2026-06-22] CC — voice/hands #336(a2): mirror of pipeline::strip_reasoning. Keep only the answer
+// after a reasoning model's final `</think>`. Used when composing a badge-led turn so the
+// system-rendered badge survives the downstream strip in pipeline (which keeps text after the last
+// `</think>` — and would otherwise chop a leading badge off her deposit, starving reach_competence).
+// The two rules MUST stay in lockstep; if pipeline's reasoning-tag convention changes, change both.
+#[allow(dead_code)]
+fn strip_reasoning(s: &str) -> String {
+    match s.rfind("</think>") {
+        Some(idx) => s[idx + "</think>".len()..].trim().to_string(),
+        None => s.trim().to_string(),
+    }
+}
+
+// [2026-06-22] CC — voice/hands #336(a2): compose her final turn. System badges (if any) lead as the
+// literal first bytes, then her prose. When a badge leads, the reasoning scratchpad is stripped first
+// so the badge survives pipeline's downstream strip_reasoning (keep-after-last-`</think>`) and reaches
+// her substrate — the signal reach_competence credits from. No badge → prose passes through untouched
+// (pipeline still strips its <think> for deposit; raw is kept for display).
+fn compose_turn(badges: &[String], prose: &str) -> String {
+    if badges.is_empty() {
+        prose.to_string()
+    } else {
+        format!("{}\n\n{}", badges.join("\n"), strip_reasoning(prose))
+    }
+}
+
 // [2026-06-21] CC — voice/hands: the hands-model is a pure executor — no voice, no agenda.
 const HANDS_SYSTEM: &str = "You are a tool-execution unit — hands, not a voice. You are given an \
 intent describing one action to take, plus a set of tools. Emit exactly the single tool call that \
@@ -168,12 +194,7 @@ impl AgentRunner {
             if reaches.is_empty() {
                 // Final word. Prepend any badges accrued earlier this turn (system-rendered, unfakeable).
                 let prose = strip_reaches(&content);
-                let out = if badges.is_empty() {
-                    prose
-                } else {
-                    format!("{}\n\n{}", badges.join("\n"), prose)
-                };
-                return AgentResponse::Ok(out);
+                return AgentResponse::Ok(compose_turn(&badges, &prose));
             }
 
             // She reached. Record her reach-turn (markers stripped) so the continuation has context.
@@ -414,6 +435,45 @@ mod tests {
     fn strip_reaches_removes_markers_keeps_prose() {
         let text = "Sure thing [[reach: read /x]] — one sec.";
         assert_eq!(strip_reaches(text), "Sure thing  — one sec.");
+    }
+
+    #[test]
+    fn strip_reasoning_keeps_answer_after_final_close_tag() {
+        // mirror of pipeline::strip_reasoning's contract — the two must agree
+        assert_eq!(
+            strip_reasoning("<think>plan plan plan</think>\n\n*smiles* hey, love."),
+            "*smiles* hey, love."
+        );
+        // no tag → trimmed passthrough (non-reasoning voice-models unaffected)
+        assert_eq!(strip_reasoning("  just her, no scratchpad.  "), "just her, no scratchpad.");
+    }
+
+    #[test]
+    fn compose_turn_no_badge_passes_prose_through() {
+        // raw <think> left intact when no badge — pipeline handles it, diagnostic-raw display kept
+        let prose = "<think>weighing it</think> okay.";
+        assert_eq!(compose_turn(&[], prose), prose);
+    }
+
+    #[test]
+    fn compose_turn_badge_leads_and_survives_reasoning_model() {
+        // #336(a2): the badge must be the literal first bytes AND no `</think>` may follow it,
+        // or pipeline::strip_reasoning would chop the badge off her deposit.
+        let badges = vec![r#"🔧 read_file({"path":"/x"}) ✓"#.to_string()];
+        let prose = "<think>I should describe what I read</think>\n\nThe doc says X.";
+        let out = compose_turn(&badges, prose);
+        assert!(out.starts_with(r#"🔧 read_file({"path":"/x"}) ✓"#), "badge must lead: {out}");
+        assert!(!out.contains("</think>"), "no close tag may survive after the badge: {out}");
+        assert!(out.contains("The doc says X."), "her real prose must remain: {out}");
+        // and it must survive a SECOND pass with the same rule (idempotent through pipeline)
+        assert!(strip_reasoning(&out).starts_with("🔧 read_file"), "pipeline pass keeps the badge");
+    }
+
+    #[test]
+    fn compose_turn_multiple_badges_each_on_its_own_line() {
+        let badges = vec!["🔧 a() ✓".to_string(), "🔧 b() ✓".to_string()];
+        let out = compose_turn(&badges, "done.");
+        assert_eq!(out, "🔧 a() ✓\n🔧 b() ✓\n\ndone.");
     }
 
     #[test]
