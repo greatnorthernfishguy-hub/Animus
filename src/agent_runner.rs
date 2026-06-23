@@ -19,6 +19,7 @@
 //      Tolerant JSON parse for LLM-produced arguments strings.
 // -------------------
 
+use crate::text::strip_reasoning;
 use crate::tool_dispatcher::ToolDispatcher;
 use std::sync::Arc;
 use tracing::warn;
@@ -95,19 +96,6 @@ fn format_badge(tool_name: &str, args_compact: &str, ok: bool, reason: &str) -> 
         format!("🔧 {tool_name}({args_compact}) ✓")
     } else {
         format!("🔧 {tool_name}({args_compact}) ✗ {reason}")
-    }
-}
-
-// [2026-06-22] CC — voice/hands #336(a2): mirror of pipeline::strip_reasoning. Keep only the answer
-// after a reasoning model's final `</think>`. Used when composing a badge-led turn so the
-// system-rendered badge survives the downstream strip in pipeline (which keeps text after the last
-// `</think>` — and would otherwise chop a leading badge off her deposit, starving reach_competence).
-// The two rules MUST stay in lockstep; if pipeline's reasoning-tag convention changes, change both.
-#[allow(dead_code)]
-fn strip_reasoning(s: &str) -> String {
-    match s.rfind("</think>") {
-        Some(idx) => s[idx + "</think>".len()..].trim().to_string(),
-        None => s.trim().to_string(),
     }
 }
 
@@ -437,16 +425,8 @@ mod tests {
         assert_eq!(strip_reaches(text), "Sure thing  — one sec.");
     }
 
-    #[test]
-    fn strip_reasoning_keeps_answer_after_final_close_tag() {
-        // mirror of pipeline::strip_reasoning's contract — the two must agree
-        assert_eq!(
-            strip_reasoning("<think>plan plan plan</think>\n\n*smiles* hey, love."),
-            "*smiles* hey, love."
-        );
-        // no tag → trimmed passthrough (non-reasoning voice-models unaffected)
-        assert_eq!(strip_reasoning("  just her, no scratchpad.  "), "just her, no scratchpad.");
-    }
+    // strip_reasoning's own unit tests live with it in crate::text; here we test its use in
+    // compose_turn — that a badge survives it (the #336 a2 invariant).
 
     #[test]
     fn compose_turn_no_badge_passes_prose_through() {

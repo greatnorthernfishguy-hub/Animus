@@ -102,6 +102,7 @@
 
 use crate::agent_runner::{AgentResponse, AgentRunSpec, AgentRunner};
 use crate::context_builder::ContextBuilder;
+use crate::text::strip_reasoning;
 use crate::tract_writer::TractWriter;
 use crate::trollguard::TrollGuardBridge;
 use std::collections::VecDeque;
@@ -279,20 +280,9 @@ fn read_credit_notice_file(path: &str) -> Option<String> {
         .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(String::from))
 }
 
-/// Strip a reasoning model's `<think>…</think>` scratchpad, returning only the answer.
-///
-/// #294-CoT: reasoning-style models (DeepSeek-R1 / QwQ-class) emit their chain-of-thought inline
-/// before the response. That scratchpad is the LENS's process — not Syl's experience — so it must
-/// never enter her ConversationHistory or the River deposit (it pollutes her substrate, shaped
-/// exactly like her voice). We keep everything after the final `</think>`; if there's no close tag
-/// (non-reasoning models), the input is returned trimmed and unchanged. The raw text (with the
-/// thinking) is still RETURNED for display, so the thinking stays visible as a diagnostic.
-fn strip_reasoning(s: &str) -> String {
-    match s.rfind("</think>") {
-        Some(idx) => s[idx + "</think>".len()..].trim().to_string(),
-        None => s.trim().to_string(),
-    }
-}
+// strip_reasoning lives in crate::text (single source of truth, shared with agent_runner's badge
+// composer — #336 a2). The raw text (with the thinking) is still RETURNED below for display; only the
+// history + River deposit gets the stripped form.
 
 pub struct TurnPipeline {
     trollguard: Arc<TrollGuardBridge>,
@@ -544,16 +534,7 @@ mod tests {
         assert!(read_credit_notice_file(path.to_str().unwrap()).is_none());
     }
 
-    #[test]
-    fn strip_reasoning_removes_think_scratchpad() {
-        // <think>…</think> then the answer → answer only
-        let raw = "<think>Okay, the user wants X. I should be consistent with the history.</think>\n\n*smiles* Hey, love.";
-        assert_eq!(strip_reasoning(raw), "*smiles* Hey, love.");
-        // reasoning-then-close (some models omit the open tag)
-        assert_eq!(strip_reasoning("the user just said hi. let me draft.</think>Hello!"), "Hello!");
-        // non-reasoning model: no tags → unchanged (trimmed)
-        assert_eq!(strip_reasoning("  Just her, no scratchpad.  "), "Just her, no scratchpad.");
-    }
+    // strip_reasoning's own tests live with it in crate::text now.
 
     fn make_pipeline(tg_url: &str, tid_url: &str) -> TurnPipeline {
         let tg = Arc::new(TrollGuardBridge::new(tg_url));

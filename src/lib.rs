@@ -38,6 +38,7 @@ pub mod envelope;
 pub mod introspection;
 pub mod outbound;
 pub mod pipeline;
+pub mod text;
 pub mod tool_dispatcher;
 pub mod tract_writer;
 pub mod trollguard;
