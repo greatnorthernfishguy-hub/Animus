@@ -2453,6 +2453,26 @@ class AnimaGUI:
                     self._widget_line_count(getattr(self, "_log_text", None)),
                 )
             )
+            # Tcl-interp handle counts — the leak is C-heap/Tcl-side (flat in gc + tracemalloc
+            # + widget sizes, climbing in RSS), so a growing HANDLE count names the mechanism:
+            # commands (registered callbacks/widgets), after-timers, images (PhotoImage),
+            # globals (StringVars), fonts. If all flat but RSS climbs → it's Tcl value/string
+            # churn, not handles → fall back to the poll-loop bisect.
+            try:
+                _tk = self.root.tk
+                def _ll(expr):
+                    try:
+                        return int(_tk.eval("llength [%s]" % expr))
+                    except Exception:
+                        return "?"
+                out.append(
+                    "tcl: commands={} after_timers={} images={} globals={} fonts={}".format(
+                        _ll("info commands"), _ll("after info"),
+                        _ll("image names"), _ll("info globals"), _ll("font names"),
+                    )
+                )
+            except Exception as exc:
+                out.append("tcl introspection error: %s" % exc)
             # Python-side object histogram
             gc.collect()
             counts = Counter(type(o).__name__ for o in gc.get_objects())
