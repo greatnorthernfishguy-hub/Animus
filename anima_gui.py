@@ -136,6 +136,25 @@ if _MEMPROBE_ON and not tracemalloc.is_tracing():
     except Exception:
         pass
 
+# #anima-gui-leak FIX (2026-06-24): the residual ~75-200MB/h RSS climb is NOT a code leak —
+# it's glibc heap fragmentation under the GUI's poll churn (proven: every measurable signal
+# flat — gc/tracemalloc/Tk-handles/widgets — yet one live malloc_trim(0) freed 83MB). glibc
+# holds freed small-object memory in per-thread arena free-lists instead of returning it.
+# Fix at the allocator (in-code so it holds regardless of launch env):
+#   1. cap arenas (M_ARENA_MAX=2) — far less fragmentation at the source;
+#   2. periodically malloc_trim(0) — return held free pages to the OS, bounding RSS.
+# Disable with ANIMA_GUI_MALLOC_TRIM=0; tune cadence with ANIMA_GUI_MALLOC_TRIM_S.
+_MALLOC_TRIM_ON = os.environ.get("ANIMA_GUI_MALLOC_TRIM", "1") not in ("0", "false", "False", "")
+_MALLOC_TRIM_INTERVAL_MS = int(os.environ.get("ANIMA_GUI_MALLOC_TRIM_S", "180")) * 1000
+_libc = None
+if _MALLOC_TRIM_ON:
+    try:
+        import ctypes
+        _libc = ctypes.CDLL("libc.so.6")
+        _libc.mallopt(-8, 2)  # M_ARENA_MAX = -8; cap to 2 arenas (set before fetch threads spawn)
+    except Exception:
+        _libc = None
+
 # ---------------------------------------------------------------------------
 # Optional watchdog import
 # ---------------------------------------------------------------------------
@@ -1574,6 +1593,12 @@ class AnimaGUI:
             _logger.info("anima-gui memory probe ON — %ds interval → %s",
                          _MEMPROBE_INTERVAL_MS // 1000, _MEMPROBE_LOG)
 
+        # #anima-gui-leak FIX: periodic malloc_trim to keep glibc fragmentation bounded
+        if _libc is not None:
+            self.root.after(_MALLOC_TRIM_INTERVAL_MS, self._malloc_maintenance)
+            _logger.info("anima-gui malloc maintenance ON — trim every %ds (M_ARENA_MAX=2)",
+                         _MALLOC_TRIM_INTERVAL_MS // 1000)
+
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -2414,7 +2439,20 @@ class AnimaGUI:
         self._update_log.see(tk.END)
         self._update_log.config(state=tk.DISABLED)
 
-    # ---- #anima-gui-leak memory probe ----
+    # ---- #anima-gui-leak fix + probe ----
+
+    def _malloc_maintenance(self) -> None:
+        """Return glibc free pages to the OS (the fragmentation fix). Reschedules itself.
+        Never raises into the Tk loop."""
+        if _libc is not None:
+            try:
+                _libc.malloc_trim(0)
+            except Exception:
+                pass
+        try:
+            self.root.after(_MALLOC_TRIM_INTERVAL_MS, self._malloc_maintenance)
+        except Exception:
+            pass
 
     def _widget_line_count(self, widget: Any) -> Any:
         try:
