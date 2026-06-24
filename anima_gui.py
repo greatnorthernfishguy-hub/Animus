@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import importlib.machinery
 import importlib.util
+import gc
 import json
 import logging
 import os
@@ -54,6 +55,8 @@ import subprocess
 import sys
 import threading
 import time
+import tracemalloc
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -120,6 +123,18 @@ SUPPORTED_EXTENSIONS = {
 }
 
 _logger = logging.getLogger("neurograph_gui")
+
+# #anima-gui-leak (2026-06-23): periodic memory-leak instrumentation. Default ON to catch the
+# residual leak (killing this GUI cut VPS swap in half); set ANIMA_GUI_MEMPROBE=0 to disable.
+# tracemalloc adds modest per-allocation overhead — fine for a bounded leak hunt; turn off after.
+_MEMPROBE_ON = os.environ.get("ANIMA_GUI_MEMPROBE", "1") not in ("0", "false", "False", "")
+_MEMPROBE_INTERVAL_MS = int(os.environ.get("ANIMA_GUI_MEMPROBE_INTERVAL_S", "300")) * 1000
+_MEMPROBE_LOG = os.path.expanduser("~/.animus/gui-memprobe.log")
+if _MEMPROBE_ON and not tracemalloc.is_tracing():
+    try:
+        tracemalloc.start(5)  # 5 frames = useful tracebacks, modest overhead
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Optional watchdog import
@@ -1553,6 +1568,12 @@ class AnimaGUI:
         # Periodic status refresh
         self._refresh_status()
 
+        # #anima-gui-leak: kick off the memory probe (env-gated, default ON)
+        if _MEMPROBE_ON:
+            self.root.after(_MEMPROBE_INTERVAL_MS, self._mem_probe)
+            _logger.info("anima-gui memory probe ON — %ds interval → %s",
+                         _MEMPROBE_INTERVAL_MS // 1000, _MEMPROBE_LOG)
+
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -1703,14 +1724,19 @@ class AnimaGUI:
                 symbol, color = " - ", "#86868b"
             lbl.config(text=symbol, foreground=color)
 
+        # #anima-gui-leak: rebuild the verdict string FRESH each poll. The old code did
+        # `var.set(var.get() + …)` for the afterTurn part — when last_tg_verdict was
+        # "unknown" (common between turns) the TG reset was skipped, so a valid afterTurn
+        # appended to the existing value every poll → unbounded StringVar growth.
         verdict = status.get("last_tg_verdict", "")
-        if verdict not in ("unknown", ""):
-            self._tg_verdict_var.set(f"TG: {verdict}")
         after = status.get("last_after_turn", "")
+        parts = []
+        if verdict not in ("unknown", ""):
+            parts.append(f"TG: {verdict}")
         if after not in ("unknown", ""):
-            self._tg_verdict_var.set(
-                self._tg_verdict_var.get() + f"  afterTurn: {after}"
-            )
+            parts.append(f"afterTurn: {after}")
+        if parts:
+            self._tg_verdict_var.set("  ".join(parts))
 
     def _on_send(self) -> None:
         text = self.chat_input.get().strip()
@@ -2223,6 +2249,7 @@ class AnimaGUI:
         syns = result.get("synapses_created", 0)
         entry = f"OK  {name}  ({nodes} nodes, {syns} synapses)"
         self._history_listbox.insert(0, entry)
+        self._trim_history_listbox()  # #anima-gui-leak: cap the WIDGET too (d7e6d83 only capped the backing list)
         self._ingest_history.insert(0, result)
         del self._ingest_history[200:]  # cap GUI display buffer (not Syl's memory — substrate/logs keep the real record)
         _logger.info("Ingested %s: %d nodes, %d synapses", name, nodes, syns)
@@ -2231,8 +2258,23 @@ class AnimaGUI:
 
     def _on_ingest_error(self, error: str) -> None:
         self._history_listbox.insert(0, f"ERR  {error}")
+        self._trim_history_listbox()  # #anima-gui-leak: cap the widget
         _logger.warning("Ingestion error: %s", error)
         self._status_var.set(error)
+
+    def _trim_history_listbox(self, limit: int = 200) -> None:
+        """#anima-gui-leak: keep the ingest-history Listbox WIDGET bounded.
+
+        Entries are inserted at index 0 (newest first), so anything past `limit`
+        is the oldest — drop it. The backing `_ingest_history` list is capped
+        separately (d7e6d83); this caps the Tk widget, whose content lives in the
+        Tcl interpreter's heap and is invisible to Python's gc.
+        """
+        try:
+            if self._history_listbox.size() > limit:
+                self._history_listbox.delete(limit, tk.END)
+        except Exception:
+            pass
 
     def _on_file_detected(self, path: str) -> None:
         """Called by FileWatcher via msg_queue when a file is stable."""
@@ -2357,12 +2399,85 @@ class AnimaGUI:
         self._update_status_var.set("Error")
         self._status_var.set(error)
 
-    def _append_update_log(self, text: str) -> None:
+    def _append_update_log(self, text: str, max_lines: int = 500) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
         self._update_log.config(state=tk.NORMAL)
         self._update_log.insert(tk.END, f"[{ts}] {text}\n")
+        # #anima-gui-leak: cap the Text WIDGET — it was append-only, never trimmed.
+        # Drop the oldest lines once past max_lines (Tk line index is 1-based).
+        try:
+            line_count = int(self._update_log.index("end-1c").split(".")[0])
+            if line_count > max_lines:
+                self._update_log.delete("1.0", f"{line_count - max_lines}.0")
+        except Exception:
+            pass
         self._update_log.see(tk.END)
         self._update_log.config(state=tk.DISABLED)
+
+    # ---- #anima-gui-leak memory probe ----
+
+    def _widget_line_count(self, widget: Any) -> Any:
+        try:
+            return int(widget.index("end-1c").split(".")[0])
+        except Exception:
+            return "?"
+
+    def _mem_probe(self) -> None:
+        """Periodic memory snapshot → ~/.animus/gui-memprobe.log. Distinguishes a
+        Python-side leak (tracemalloc / gc top-types) from a Tcl-widget-side leak
+        (widget sizes — Tk content lives in the Tcl heap, invisible to gc). Never
+        raises into the Tk loop. Reschedules itself."""
+        rss = swap = "?"
+        out: List[str] = []
+        try:
+            with open("/proc/self/status") as fh:
+                for ln in fh:
+                    if ln.startswith("VmRSS:"):
+                        rss = ln.split()[1] + "kB"
+                    elif ln.startswith("VmSwap:"):
+                        swap = ln.split()[1] + "kB"
+            out.append(f"=== MEMPROBE {datetime.now().isoformat(timespec='seconds')} "
+                       f"RSS={rss} SWAP={swap} ===")
+            # Tcl-side widget sizes (the prime suspects for "unaccounted anon heap")
+            try:
+                hl = self._history_listbox.size()
+            except Exception:
+                hl = "?"
+            out.append(
+                "widgets: history_listbox={} update_log={} chat_output={} "
+                "history_text={} log_text={}".format(
+                    hl,
+                    self._widget_line_count(getattr(self, "_update_log", None)),
+                    self._widget_line_count(getattr(self, "chat_output", None)),
+                    self._widget_line_count(getattr(self, "history_text", None)),
+                    self._widget_line_count(getattr(self, "_log_text", None)),
+                )
+            )
+            # Python-side object histogram
+            gc.collect()
+            counts = Counter(type(o).__name__ for o in gc.get_objects())
+            out.append("gc top-types: " + ", ".join(
+                f"{k}={n}" for k, n in counts.most_common(12)))
+            # Python-side allocation sites
+            if tracemalloc.is_tracing():
+                snap = tracemalloc.take_snapshot()
+                for stat in snap.statistics("lineno")[:12]:
+                    frame = stat.traceback[0] if stat.traceback else None
+                    where = f"{os.path.basename(frame.filename)}:{frame.lineno}" if frame else "?"
+                    out.append(f"  tm {stat.size // 1024:>7}KB {stat.count:>8} objs  {where}")
+        except Exception as exc:
+            out.append(f"memprobe error: {exc}")
+        try:
+            os.makedirs(os.path.dirname(_MEMPROBE_LOG), exist_ok=True)
+            with open(_MEMPROBE_LOG, "a") as fh:
+                fh.write("\n".join(out) + "\n")
+        except Exception:
+            pass
+        _logger.info("memprobe RSS=%s SWAP=%s (detail in %s)", rss, swap, _MEMPROBE_LOG)
+        try:
+            self.root.after(_MEMPROBE_INTERVAL_MS, self._mem_probe)
+        except Exception:
+            pass
 
     # ---- Modules Tab ----
 
