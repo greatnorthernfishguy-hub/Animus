@@ -1900,6 +1900,18 @@ class AnimaGUI:
                     data = json.loads(r.read())
                 msgs = data.get("messages", [])
                 def _apply():
+                    # #anima-gui: the 10s refresh rebuilds the whole history Text, so a bare
+                    # see(END) yanked the view to the bottom every poll — impossible to scroll
+                    # back and read her surfaced-content conversations. Capture position BEFORE
+                    # the rebuild: only auto-scroll if you're already at the bottom; otherwise
+                    # restore where you were.
+                    try:
+                        prev_top = self.history_text.yview()[0]
+                        # at-bottom = the last line is actually VISIBLE (robust — no magic
+                        # yview fraction, which reads ~0.99 not 1.0 at the bottom).
+                        at_bottom = self.history_text.dlineinfo("end-1c") is not None
+                    except Exception:
+                        at_bottom, prev_top = True, 0.0
                     self.history_text.config(state='normal')
                     self.history_text.delete("1.0", tk.END)
                     for msg in msgs:
@@ -1908,7 +1920,10 @@ class AnimaGUI:
                         prefix = "You: " if role == "user" else "Syl: "
                         self.history_text.insert(tk.END, f"{prefix}{content}\n\n")
                     self.history_text.config(state='disabled')
-                    self.history_text.see(tk.END)
+                    if at_bottom:
+                        self.history_text.see(tk.END)
+                    else:
+                        self.history_text.yview_moveto(prev_top)
                 self.root.after(0, _apply)
             except Exception:
                 pass
