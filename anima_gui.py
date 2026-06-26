@@ -17,6 +17,16 @@ Environment:
 """
 
 # ---- Changelog ----
+# [2026-06-25] Claude (Sonnet 4.6) — Feedback bar: thumbs ▲/▼ + category submenu for TID (#276)
+# What: Compact widget below Conversation History in the right panel. ▲/▼ appear after any
+#       Syl response; clicking reveals 4 category chips (Embodiment, Tool Use, Quality,
+#       TID Tag). Category click fires POST /feedback to TID (127.0.0.1:7437, fire-and-forget).
+#       Bar resets on each new Syl turn. Status label echoes the model_id on confirm.
+# Why: TID /feedback existed (#276) but curl-only. Gives Josh one-click routing signal.
+#      Category lands in `note` field now; routing gates redesign (2026-06-25 design doc)
+#      will route per-category signals to the right axis (embodiment→CQ, tool→tool_competence).
+# How: 3 new methods (_feedback_reset/_feedback_thumb/_feedback_send) + state
+#      (_last_syl_content detects new turns, _feedback_pending stages thumb direction).
 # [2026-06-02] Claude (Sonnet 4.6) — GUI bug fixes (7 issues)
 # What: (1) Pipeline labels use ASCII text not Unicode circles (rendered as "0" on VPS font)
 #       (2) Immediate fast poll kicked off in _on_send (was waiting up to 5s idle timer)
@@ -1571,6 +1581,8 @@ class AnimaGUI:
         self.file_watcher: Optional[FileWatcher] = None
         self._ingest_history: List[Dict[str, Any]] = []
         self._turn_in_flight: bool = False
+        self._last_syl_content: str = ""        # detects new Syl turns → resets feedback bar
+        self._feedback_pending: Optional[bool] = None  # staged thumb direction before category
 
         # Build the UI
         self._build_menu()
@@ -1715,6 +1727,39 @@ class AnimaGUI:
             font=("Courier", 8), height=12, relief=tk.FLAT,
         )
         self.history_text.pack(fill=tk.BOTH, expand=True)
+
+        # -- Feedback bar: ▲/▼ thumbs + category submenu → POST TID /feedback --
+        self._feedback_bar = ttk.Frame(right_frame)
+        self._feedback_bar.pack(fill=tk.X, pady=(4, 0))
+        ttk.Label(self._feedback_bar, text="Rate turn:",
+                  font=("Helvetica", 8)).pack(side=tk.LEFT, padx=(0, 4))
+        self._fb_up_btn = ttk.Button(
+            self._feedback_bar, text="▲", width=3,
+            command=lambda: self._feedback_thumb(True),
+        )
+        self._fb_up_btn.pack(side=tk.LEFT, padx=(0, 2))
+        self._fb_down_btn = ttk.Button(
+            self._feedback_bar, text="▼", width=3,
+            command=lambda: self._feedback_thumb(False),
+        )
+        self._fb_down_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self._fb_status_var = tk.StringVar(value="—")
+        ttk.Label(
+            self._feedback_bar, textvariable=self._fb_status_var,
+            font=("Helvetica", 8), foreground="#86868b",
+        ).pack(side=tk.LEFT)
+
+        # Category submenu — hidden until thumb clicked
+        self._feedback_submenu = ttk.Frame(right_frame)
+        for _cat, _nk in [("Embodiment", "embodiment"), ("Tool Use", "tool_use"),
+                           ("Quality", "quality"), ("TID Tag", "tid_tag")]:
+            ttk.Button(
+                self._feedback_submenu, text=_cat, width=9,
+                command=lambda n=_nk: self._feedback_send(n),
+            ).pack(side=tk.LEFT, padx=2, pady=2)
+
+        self._fb_up_btn.config(state="disabled")
+        self._fb_down_btn.config(state="disabled")
 
     def _append_chat(self, sender: str, text: str) -> None:
         self.chat_output.config(state='normal')
@@ -1919,6 +1964,14 @@ class AnimaGUI:
                         content = msg.get("content", "")
                         prefix = "You: " if role == "user" else "Syl: "
                         self.history_text.insert(tk.END, f"{prefix}{content}\n\n")
+                    # New Syl turn? Re-arm feedback bar.
+                    _syl = [m for m in msgs if m.get("role") != "user"]
+                    _last = _syl[-1].get("content", "") if _syl else ""
+                    if _last != self._last_syl_content:
+                        self._last_syl_content = _last
+                        self._feedback_pending = None
+                        if _last:
+                            self._feedback_reset()
                     self.history_text.config(state='disabled')
                     if at_bottom:
                         self.history_text.see(tk.END)
@@ -1930,6 +1983,53 @@ class AnimaGUI:
             finally:
                 self.root.after(self._POLL_HISTORY_MS, self._poll_history)
         threading.Thread(target=_fetch, daemon=True).start()
+
+    def _feedback_reset(self) -> None:
+        """Re-arm the feedback bar for the new Syl turn."""
+        self._fb_up_btn.config(state="normal")
+        self._fb_down_btn.config(state="normal")
+        self._fb_status_var.set("—")
+        self._feedback_submenu.pack_forget()
+
+    def _feedback_thumb(self, thumbs_up: bool) -> None:
+        """Thumb clicked — stage direction and reveal category submenu."""
+        self._feedback_pending = thumbs_up
+        self._fb_status_var.set("▲ choose:" if thumbs_up else "▼ choose:")
+        if not self._feedback_submenu.winfo_ismapped():
+            self._feedback_submenu.pack(fill=tk.X, pady=(2, 0))
+
+    def _feedback_send(self, category: str) -> None:
+        """Category chosen — POST to TID /feedback, collapse submenu, disable until next turn."""
+        if self._feedback_pending is None:
+            return
+        thumbs_up = self._feedback_pending
+        self._feedback_submenu.pack_forget()
+        self._fb_up_btn.config(state="disabled")
+        self._fb_down_btn.config(state="disabled")
+        mark = "▲" if thumbs_up else "▼"
+        self._fb_status_var.set(f"{mark} {category} …")
+
+        def _post():
+            import urllib.request
+            payload = json.dumps(
+                {"thumbs_up": thumbs_up, "note": f"category:{category}"}
+            ).encode()
+            req = urllib.request.Request(
+                "http://127.0.0.1:7437/feedback",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=3) as r:
+                    resp = json.loads(r.read())
+                model = resp.get("model_id", "")
+                short = model.split("/")[-1][:16] if "/" in model else model[:16]
+                self.root.after(0, self._fb_status_var.set, f"{mark} {short}")
+            except Exception:
+                self.root.after(0, self._fb_status_var.set, f"{mark} {category} (err)")
+
+        threading.Thread(target=_post, daemon=True).start()
 
     def _build_status_bar(self) -> None:
         self._status_var = tk.StringVar(value="Ready")
