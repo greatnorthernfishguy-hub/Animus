@@ -1,5 +1,14 @@
 // src/pipeline.rs
 // ---- Changelog ----
+// [2026-06-28] Claude Code (Sonnet 4.6) — #294-B: add lastAssistantMessage to afterTurn payload
+// What: capture strip_reasoning()'d assistant response as Option<String> before the match, set it
+//       in the AgentResponse::Ok arm, move into the afterTurn spawn and include as lastAssistantMessage
+//       if Some. InfraError turns remain None — not Syl's turns, must not enter the substrate.
+// Why:  NeuroGraph's handle_after_turn() already reads lastAssistantMessage to file her response
+//       into the recall store via _file_conversational_experience() (#294-B, neurograph_rpc.py).
+//       The field was missing from the payload — NG received None for the assistant half every turn.
+// How:  mut body + conditional body["lastAssistantMessage"] insert. Reuses the already-stripped
+//       clean_response so the reasoning scratchpad never reaches the recall store.
 // [2026-06-14] Claude Code (Opus 4.8) — #294-CoT: strip reasoning-model <think> scratchpad from deposit/history
 // What: new strip_reasoning(); the POST-RUN Ok branch deposits + histories the STRIPPED response
 //       (everything after the final </think>), while still RETURNING the raw text for display.
@@ -440,6 +449,9 @@ impl TurnPipeline {
         // Gated on AgentResponse::Ok — infra errors are not Syl turns and must not
         // enter ConversationHistory or the River substrate.
         { let mut s = self.status.lock().unwrap(); s.stage = Stage::PostRun; s.stage_state = StageState::Running; }
+        // Capture the stripped assistant response for afterTurn (#294-B) — scoped here so the
+        // spawn can move it. Set inside Ok arm below; None on infra error (not a Syl turn).
+        let mut assistant_for_after_turn: Option<String> = None;
         let response = match agent_response {
             AgentResponse::Ok(text) => {
                 if text.is_empty() {
@@ -460,6 +472,9 @@ impl TurnPipeline {
                     // reach NG's _absorb -> want-bucket via the proven experience-frame path.
                     self.tract.deposit_experience_silent("anima", clean_response.as_bytes());
                     self.history.push_turn(&clean_text, &clean_response);
+                    // #294-B: carry her stripped response into afterTurn so NG can file it into the
+                    // recall store (dual-pass). Reasoning scratchpad already stripped above.
+                    assistant_for_after_turn = Some(clean_response.to_string());
                 }
                 text
             }
@@ -477,9 +492,12 @@ impl TurnPipeline {
         let ng_client = self.ng_client.clone();
         let status_arc = Arc::clone(&self.status);
         tokio::spawn(async move {
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "lastUserMessage": {"role": "user", "content": user_text}
             });
+            if let Some(resp) = assistant_for_after_turn {
+                body["lastAssistantMessage"] = serde_json::json!({"role": "assistant", "content": resp});
+            }
             match ng_client
                 .post(format!("{}/afterTurn", ng_url))
                 .json(&body)
