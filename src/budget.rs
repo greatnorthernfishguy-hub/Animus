@@ -114,9 +114,34 @@ impl BudgetMonitor {
         }
 
         let data: OpenRouterKey = resp.json().await.map_err(|e| format!("Parse: {e}"))?;
-        // Credits are in 1/1000 USD units
-        let limit = data.data.limit.unwrap_or(f64::INFINITY);
-        Ok((limit - data.data.usage).max(0.0) / 1000.0)
+        // `limit` is the OPTIONAL per-key spending cap OpenRouter lets you set on a key —
+        // most keys (including ours) have none configured, so the API returns `limit: null`.
+        // Previously `unwrap_or(f64::INFINITY)` treated that as "unlimited remaining budget",
+        // so `remaining` was always Infinity (serializes to JSON `null`), always >= both
+        // thresholds, and `low`/`critical` NEVER fired — the budget gate silently did nothing
+        // from the day it was built (2026-05-15) through the 2026-07-02 overnight $45 burn.
+        // Fail CLOSED instead: without a configured limit we cannot compute a real remaining
+        // balance from this endpoint (it reports usage, not account credit balance), so report
+        // $0.00 — forces low+critical true — rather than assuming unlimited credit.
+        // Proper long-term fix: OpenRouter's GET /api/v1/credits returns real
+        // {total_credits, total_usage}, but requires a separate Management API key
+        // (openrouter.ai/docs/guides/overview/auth/management-api-keys) — higher-privilege
+        // than our inference key, not wired up here. Until then, set a spending limit on the
+        // existing key at openrouter.ai/settings/keys to get accurate tracking through this
+        // endpoint.
+        match data.data.limit {
+            Some(limit) => Ok((limit - data.data.usage).max(0.0) / 1000.0),
+            None => {
+                warn!(
+                    "BudgetMonitor: OpenRouter key has no spending limit configured — cannot \
+                     compute real remaining balance from /auth/key (it has no account-credit \
+                     field). Failing CLOSED (reporting $0.00) instead of assuming unlimited \
+                     credit. Set a key limit at openrouter.ai/settings/keys to restore accurate \
+                     tracking."
+                );
+                Ok(0.0)
+            }
+        }
     }
 
     pub fn write_budget_flag(
