@@ -3,6 +3,25 @@
 // Gated on OPENROUTER_API_KEY; spawned only when the key is present.
 //
 // ---- Changelog ----
+// [2026-07-02] Claude (Sonnet 4.6) — Fix fail-open bug + switch to local daily ceiling
+// What: poll_openrouter() previously computed remaining from the key's per-key `limit`
+//       field, unwrap_or(f64::INFINITY) when unset (the common case) — always Infinity,
+//       always "not critical", gate never fired since it was built. Confirmed live via
+//       inference_budget.json showing remaining_usd:null (Infinity serializes as null).
+//       Root cause of the 2026-07-02 overnight $45 burn. Replaced entirely: now reads
+//       OpenRouter's usage_daily field (real, already whole-USD — verified live against
+//       account data same day) and compares against a new local daily_budget_usd ceiling
+//       (ANIMUS_DAILY_BUDGET_USD, LAW 5) instead of any OpenRouter-side limit config.
+// Why:  Per-key limits and workspace-level Guardrails are two separate OpenRouter
+//       mechanisms; a workspace-level limit Josh set did not appear in this key's
+//       `limit` field at all, and the key-level option deactivates the key outright on
+//       trip (too blunt — we want a graceful pause, not a dead key). usage_daily needs
+//       no dashboard config on OpenRouter's side to work correctly.
+// How:  OpenRouterKeyData narrowed to usage_daily only. low/critical thresholds
+//       (budget_low_usd/budget_critical_usd) recalibrated — old defaults (10.0/2.0)
+//       assumed "dollars left in a large account balance"; against a $5/day ceiling
+//       that made `low` permanently true. New defaults 2.0/0.50, absolute USD against
+//       the daily ceiling (not a percentage — simpler, matches existing env var shape).
 // [2026-05-15] Claude (Sonnet 4.6) — Task 2: BudgetMonitor
 // What: Background task polling OpenRouter /api/v1/auth/key every N secs.
 //       Writes inference_budget.json to shared_learning dir.
@@ -24,8 +43,7 @@ struct OpenRouterKey {
 
 #[derive(Deserialize)]
 struct OpenRouterKeyData {
-    usage: f64,
-    limit: Option<f64>,
+    usage_daily: f64,
 }
 
 pub struct BudgetMonitor {
@@ -34,6 +52,7 @@ pub struct BudgetMonitor {
     poll_interval: Duration,
     low_threshold_usd: f64,
     critical_threshold_usd: f64,
+    daily_budget_usd: f64,
     pending_notice: Arc<Mutex<Option<String>>>,
 }
 
@@ -44,6 +63,13 @@ fn should_queue_notice(critical: bool, was_critical: bool) -> bool {
     critical && !was_critical
 }
 
+/// Remaining budget for today, clamped at zero (never negative even if usage
+/// has exceeded the ceiling). Pure function — the core safety math, kept
+/// separate from the network call so it's directly unit-testable.
+fn compute_remaining(daily_budget_usd: f64, usage_daily: f64) -> f64 {
+    (daily_budget_usd - usage_daily).max(0.0)
+}
+
 impl BudgetMonitor {
     pub fn new(
         api_key: String,
@@ -51,6 +77,7 @@ impl BudgetMonitor {
         poll_secs: u64,
         low_usd: f64,
         critical_usd: f64,
+        daily_budget_usd: f64,
         pending_notice: Arc<Mutex<Option<String>>>,
     ) -> Self {
         Self {
@@ -59,6 +86,7 @@ impl BudgetMonitor {
             poll_interval: Duration::from_secs(poll_secs),
             low_threshold_usd: low_usd,
             critical_threshold_usd: critical_usd,
+            daily_budget_usd,
             pending_notice,
         }
     }
@@ -114,34 +142,14 @@ impl BudgetMonitor {
         }
 
         let data: OpenRouterKey = resp.json().await.map_err(|e| format!("Parse: {e}"))?;
-        // `limit` is the OPTIONAL per-key spending cap OpenRouter lets you set on a key —
-        // most keys (including ours) have none configured, so the API returns `limit: null`.
-        // Previously `unwrap_or(f64::INFINITY)` treated that as "unlimited remaining budget",
-        // so `remaining` was always Infinity (serializes to JSON `null`), always >= both
-        // thresholds, and `low`/`critical` NEVER fired — the budget gate silently did nothing
-        // from the day it was built (2026-05-15) through the 2026-07-02 overnight $45 burn.
-        // Fail CLOSED instead: without a configured limit we cannot compute a real remaining
-        // balance from this endpoint (it reports usage, not account credit balance), so report
-        // $0.00 — forces low+critical true — rather than assuming unlimited credit.
-        // Proper long-term fix: OpenRouter's GET /api/v1/credits returns real
-        // {total_credits, total_usage}, but requires a separate Management API key
-        // (openrouter.ai/docs/guides/overview/auth/management-api-keys) — higher-privilege
-        // than our inference key, not wired up here. Until then, set a spending limit on the
-        // existing key at openrouter.ai/settings/keys to get accurate tracking through this
-        // endpoint.
-        match data.data.limit {
-            Some(limit) => Ok((limit - data.data.usage).max(0.0) / 1000.0),
-            None => {
-                warn!(
-                    "BudgetMonitor: OpenRouter key has no spending limit configured — cannot \
-                     compute real remaining balance from /auth/key (it has no account-credit \
-                     field). Failing CLOSED (reporting $0.00) instead of assuming unlimited \
-                     credit. Set a key limit at openrouter.ai/settings/keys to restore accurate \
-                     tracking."
-                );
-                Ok(0.0)
-            }
-        }
+        // usage_daily is real, already whole-USD (not milli-USD — verified live 2026-07-02:
+        // usage_daily=0.118 matched the small residual spend visible after the overnight
+        // burn had already exhausted the account balance). daily_budget_usd is Anima's own
+        // local ceiling — independent of any OpenRouter-side config, deliberately: a
+        // workspace-level Guardrails limit Josh set did not surface anywhere in this
+        // response, and the per-key limit option deactivates the key outright on trip
+        // rather than pausing gracefully. This ceiling is the one source of truth (LAW 5).
+        Ok(compute_remaining(self.daily_budget_usd, data.data.usage_daily))
     }
 
     pub fn write_budget_flag(
@@ -171,7 +179,15 @@ mod tests {
     use tempfile::tempdir;
 
     fn make_monitor(path: &str) -> BudgetMonitor {
-        BudgetMonitor::new("test_key".into(), path.to_string(), 300, 10.0, 2.0, Arc::new(Mutex::new(None)))
+        BudgetMonitor::new(
+            "test_key".into(),
+            path.to_string(),
+            300,
+            2.0,
+            0.50,
+            5.0,
+            Arc::new(Mutex::new(None)),
+        )
     }
 
     #[test]
@@ -180,6 +196,29 @@ mod tests {
         assert!(!should_queue_notice(true, true));    // still critical, no repeat
         assert!(!should_queue_notice(false, true));   // recovered
         assert!(!should_queue_notice(false, false));  // healthy
+    }
+
+    #[test]
+    fn compute_remaining_fresh_day_is_full_budget() {
+        assert!((compute_remaining(5.0, 0.0) - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn compute_remaining_partial_usage_subtracts() {
+        assert!((compute_remaining(5.0, 1.5) - 3.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn compute_remaining_never_goes_negative() {
+        // Usage exceeding the daily ceiling (e.g. a burst before the poll caught up)
+        // must clamp to 0.0, not go negative — negative would still compare correctly
+        // against thresholds, but $0.00 is the honest, unambiguous "nothing left" signal.
+        assert_eq!(compute_remaining(5.0, 1026.60), 0.0);
+    }
+
+    #[test]
+    fn compute_remaining_exact_zero_at_ceiling() {
+        assert_eq!(compute_remaining(5.0, 5.0), 0.0);
     }
 
     #[test]

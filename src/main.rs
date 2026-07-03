@@ -177,10 +177,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cfg.budget_poll_secs,
             cfg.budget_low_usd,
             cfg.budget_critical_usd,
+            cfg.daily_budget_usd,
             pipeline.pending_notice_handle(),
         ));
         tokio::spawn(Arc::clone(&monitor).run());
-        info!("BudgetMonitor started (poll={}s, path={})", cfg.budget_poll_secs, budget_path);
+        info!(
+            "BudgetMonitor started (poll={}s, daily_ceiling=${:.2}, path={})",
+            cfg.budget_poll_secs, cfg.daily_budget_usd, budget_path
+        );
     } else {
         info!("BudgetMonitor skipped — OPENROUTER_API_KEY not set");
     }

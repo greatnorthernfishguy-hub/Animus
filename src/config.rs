@@ -1,4 +1,11 @@
 // ---- Changelog ----
+// [2026-07-02] Claude (Sonnet 4.6) — Local daily budget ceiling (see budget.rs for full context)
+// What: New field daily_budget_usd (ANIMUS_DAILY_BUDGET_USD, default 5.0). budget_low_usd/
+//       budget_critical_usd defaults recalibrated 10.0/2.0 -> 2.0/0.50 — old values assumed
+//       "dollars left in a large account balance"; against a $5/day ceiling that made "low"
+//       permanently true from the start of every day.
+// Why:  Root-cause fix for the 2026-07-02 overnight $45 burn — see budget.rs changelog.
+// How:  Same env-var-with-default pattern as the existing budget fields.
 // [2026-05-31] Claude (Sonnet 4.6) — Anima GUI Task 4: add gui_port
 // What: New field gui_port reads ANIMUS_GUI_PORT env var (default 8848)
 // Why: HttpAdapter needs the port from config (Law 5 — config from env)
@@ -44,10 +51,18 @@ pub struct AnimaConfig {
     pub ces_url: String,
     /// OpenRouter API key for budget polling. Set: OPENROUTER_API_KEY (optional)
     pub openrouter_api_key: Option<String>,
-    /// Budget "low" threshold in USD. Default: 10.0. Set: ANIMUS_BUDGET_LOW_USD
+    /// Budget "low" threshold in USD, measured against remaining daily budget
+    /// (daily_budget_usd - today's OpenRouter usage). Default: 2.0. Set: ANIMUS_BUDGET_LOW_USD
     pub budget_low_usd: f64,
-    /// Budget "critical" threshold in USD. Default: 2.0. Set: ANIMUS_BUDGET_CRITICAL_USD
+    /// Budget "critical" threshold in USD, same basis as budget_low_usd.
+    /// Default: 0.50. Set: ANIMUS_BUDGET_CRITICAL_USD
     pub budget_critical_usd: f64,
+    /// Daily spend ceiling in USD, compared against OpenRouter's usage_daily field.
+    /// This is Anima's own gate — independent of any OpenRouter dashboard config
+    /// (per-key limits and workspace Guardrails are separate, easy-to-misconfigure
+    /// mechanisms; this is the one LAW-5 source of truth). Default: 5.0.
+    /// Set: ANIMUS_DAILY_BUDGET_USD
+    pub daily_budget_usd: f64,
     /// Budget poll interval in seconds. Default: 300. Set: ANIMUS_BUDGET_POLL_SECS
     pub budget_poll_secs: u64,
     /// SearXNG or similar search endpoint. Set: ANIMUS_SEARCH_URL (optional)
@@ -93,11 +108,15 @@ impl AnimaConfig {
             budget_low_usd: env::var("ANIMUS_BUDGET_LOW_USD")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(10.0),
+                .unwrap_or(2.0),
             budget_critical_usd: env::var("ANIMUS_BUDGET_CRITICAL_USD")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(2.0),
+                .unwrap_or(0.50),
+            daily_budget_usd: env::var("ANIMUS_DAILY_BUDGET_USD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5.0),
             budget_poll_secs: env::var("ANIMUS_BUDGET_POLL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -148,12 +167,14 @@ mod tests {
         std::env::remove_var("ANIMUS_BUDGET_LOW_USD");
         std::env::remove_var("ANIMUS_BUDGET_CRITICAL_USD");
         std::env::remove_var("ANIMUS_BUDGET_POLL_SECS");
+        std::env::remove_var("ANIMUS_DAILY_BUDGET_USD");
         std::env::remove_var("ANIMUS_SEARCH_URL");
         std::env::remove_var("ANIMUS_ALLOWED_PATHS");
         let cfg = AnimaConfig::from_env().unwrap();
         assert!(cfg.openrouter_api_key.is_none());
-        assert!((cfg.budget_low_usd - 10.0).abs() < 0.01);
-        assert!((cfg.budget_critical_usd - 2.0).abs() < 0.01);
+        assert!((cfg.budget_low_usd - 2.0).abs() < 0.01);
+        assert!((cfg.budget_critical_usd - 0.50).abs() < 0.01);
+        assert!((cfg.daily_budget_usd - 5.0).abs() < 0.01);
         assert_eq!(cfg.budget_poll_secs, 300);
         assert!(cfg.search_url.is_none());
         // ANIMUS_ALLOWED_PATHS default contains $HOME/.et_modules
